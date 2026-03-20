@@ -11,6 +11,17 @@ from enum import StrEnum
 from typing import Any
 
 
+def _parse_dt(val) -> datetime | None:
+    if val is None or val == "None" or val == "null" or val == "":
+        return None
+    if isinstance(val, datetime):
+        return val
+    try:
+        return datetime.fromisoformat(str(val))
+    except (ValueError, TypeError):
+        return None
+
+
 class ArtifactType(StrEnum):
     CODE_FILE = "code_file"
     ARCHITECTURE_PLAN = "architecture_plan"
@@ -69,5 +80,5 @@ class Artifact:
             tags=data.get("tags", []),
             dependencies=data.get("dependencies", []),
             metadata=data.get("metadata", {}),
-            created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else datetime.now(timezone.utc),
+            created_at=_parse_dt(data.get("created_at")) or datetime.now(timezone.utc),
         )

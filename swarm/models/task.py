@@ -39,6 +39,18 @@ class TaskStatus(StrEnum):
     DEAD = "dead"  # exceeded retry limit
 
 
+def _parse_dt(val: Any) -> datetime | None:
+    """Safely parse a datetime from various formats (str, datetime, None, 'None')."""
+    if val is None or val == "None" or val == "null" or val == "":
+        return None
+    if isinstance(val, datetime):
+        return val
+    try:
+        return datetime.fromisoformat(str(val))
+    except (ValueError, TypeError):
+        return None
+
+
 class TaskPriority(IntEnum):
     LOW = 0
     NORMAL = 1
@@ -101,7 +113,7 @@ class Task:
             error=data.get("error"),
             retry_count=int(data.get("retry_count", 0)),
             dependencies=data.get("dependencies", []),
-            created_at=datetime.fromisoformat(data["created_at"]) if data.get("created_at") else datetime.now(timezone.utc),
-            started_at=datetime.fromisoformat(data["started_at"]) if data.get("started_at") else None,
-            completed_at=datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None,
+            created_at=_parse_dt(data.get("created_at")) or datetime.now(timezone.utc),
+            started_at=_parse_dt(data.get("started_at")),
+            completed_at=_parse_dt(data.get("completed_at")),
         )
