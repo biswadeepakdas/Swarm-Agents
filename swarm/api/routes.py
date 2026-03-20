@@ -190,6 +190,102 @@ async def inject_requirement(project_id: str, req: InjectRequirementRequest):
     }
 
 
+@router.get("/projects/{project_id}/graph")
+async def get_graph(project_id: str):
+    """Get graph data for D3.js force-directed visualization."""
+    project = await _db.get_project(project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+
+    agents = await _db.get_agents(project_id)
+    tasks = await _db.get_tasks(project_id)
+    artifacts = await _db.query_artifacts(project_id)
+
+    # Build node + edge sets
+    nodes = []
+    edges = []
+    agent_map = {}  # agent_id → node index
+    task_map = {}   # task_id → agent that executed it
+
+    # Map tasks to their assigned agents
+    for t in tasks:
+        if t.get("assigned_agent_id"):
+            task_map[t["id"]] = t["assigned_agent_id"]
+
+    # Agent nodes
+    for i, a in enumerate(agents):
+        aid = str(a.get("id", ""))
+        agent_map[aid] = i
+        persona = a.get("persona") or a.get("name") or "Agent"
+        task_type = ""
+        if a.get("personality"):
+            p = a["personality"]
+            task_type = p.get("task_type", "") if isinstance(p, dict) else ""
+        nodes.append({
+            "id": aid,
+            "label": persona,
+            "type": "agent",
+            "status": a.get("status", "dead"),
+            "task_type": task_type or a.get("task_id", ""),
+            "created_at": str(a.get("created_at", "")),
+            "died_at": str(a.get("died_at", "")),
+        })
+
+    # Edges: parent_task → child_task (agent spawned another agent's task)
+    for t in tasks:
+        spawner = t.get("spawned_by_agent_id")
+        assignee = t.get("assigned_agent_id")
+        if spawner and assignee and spawner in agent_map and assignee in agent_map:
+            edges.append({
+                "source": spawner,
+                "target": assignee,
+                "label": t.get("type", "task"),
+                "type": "spawned",
+                "status": t.get("status", "pending"),
+            })
+
+    # Edges: artifact flow (agent produces artifact → triggers another agent)
+    for art in artifacts:
+        producer = str(art.get("agent_id", ""))
+        art_type = art.get("type", "")
+        art_tags = art.get("tags", []) if isinstance(art.get("tags"), list) else []
+
+        # Find agents that consumed this artifact (via task dependencies)
+        for t in tasks:
+            consumer = t.get("assigned_agent_id")
+            deps = t.get("dependencies", []) if isinstance(t.get("dependencies"), list) else []
+            if consumer and consumer != producer and consumer in agent_map and producer in agent_map:
+                if any(tag in deps for tag in art_tags):
+                    edges.append({
+                        "source": producer,
+                        "target": consumer,
+                        "label": art_type,
+                        "type": "artifact",
+                        "status": "completed",
+                    })
+
+    # Deduplicate edges
+    seen = set()
+    unique_edges = []
+    for e in edges:
+        key = f"{e['source']}-{e['target']}-{e['label']}"
+        if key not in seen:
+            seen.add(key)
+            unique_edges.append(e)
+
+    return {
+        "project_id": project_id,
+        "nodes": nodes,
+        "edges": unique_edges,
+        "stats": {
+            "total_agents": len(agents),
+            "alive": sum(1 for a in agents if a.get("status") in ("alive", "working")),
+            "total_tasks": len(tasks),
+            "total_artifacts": len(artifacts),
+        },
+    }
+
+
 @router.get("/health")
 async def health():
     return {"status": "ok", "engine": "swarm-agents", "version": "0.1.0"}
