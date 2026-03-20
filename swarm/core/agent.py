@@ -257,12 +257,17 @@ class SwarmAgent:
     # ── LLM call ──────────────────────────────────────────────────
 
     async def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
-        """Call the LLM via litellm."""
+        """Call the LLM via litellm. Supports Anthropic, NVIDIA NIM, OpenAI, etc."""
         import os
-        # litellm reads ANTHROPIC_API_KEY from env automatically
-        # but we also set it explicitly for reliability
+
+        # Set provider-specific env vars for litellm auto-detection
         if config.llm_api_key:
-            os.environ.setdefault("ANTHROPIC_API_KEY", config.llm_api_key)
+            if "nvidia" in config.llm_provider.lower() or "nvidia" in self._model.lower():
+                os.environ["NVIDIA_NIM_API_KEY"] = config.llm_api_key
+            elif "anthropic" in config.llm_provider.lower():
+                os.environ.setdefault("ANTHROPIC_API_KEY", config.llm_api_key)
+            else:
+                os.environ.setdefault("OPENAI_API_KEY", config.llm_api_key)
 
         try:
             response = await litellm.acompletion(
@@ -273,6 +278,7 @@ class SwarmAgent:
                 ],
                 max_tokens=self._max_tokens,
                 temperature=0.7,
+                api_key=config.llm_api_key,
             )
             content = response.choices[0].message.content
 
