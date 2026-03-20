@@ -10,8 +10,8 @@ redis[hiredis]==5.2.1
 # LLM
 litellm==1.55.8
 
-# Embeddings (optional — for long-term memory semantic search)
-sentence-transformers==3.3.1
+# Embeddings (optional — install separately if needed)
+# sentence-transformers==3.3.1
 
 # Async file I/O
 aiofiles==24.1.0

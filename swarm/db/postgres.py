@@ -21,7 +21,10 @@ class PostgresDB:
         self.pool: asyncpg.Pool | None = None
 
     async def connect(self) -> None:
-        dsn = config.database_url.replace("postgresql+asyncpg://", "postgresql://")
+        dsn = config.database_url
+        # Normalize DSN for asyncpg (accepts postgresql:// only)
+        dsn = dsn.replace("postgresql+asyncpg://", "postgresql://")
+        dsn = dsn.replace("postgres://", "postgresql://")  # Railway uses postgres://
         self.pool = await asyncpg.create_pool(dsn, min_size=2, max_size=20)
         logger.info("PostgreSQL pool connected")
 
