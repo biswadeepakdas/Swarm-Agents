@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Swarm Control</title>
+  <link id="appCss" rel="stylesheet" href="/static/style.css">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+</head>
+<body>
+  <!-- ═══════════════════════════════════════════════════════════
+       TOP BAR
+       ═══════════════════════════════════════════════════════════ -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <div class="logo">
+        <span class="logo-icon">⬡</span>
+        <span class="logo-text">SWARM CONTROL</span>
+      </div>
+      <div class="topbar-divider"></div>
+      <span class="topbar-status" id="connectionStatus">DISCONNECTED</span>
+    </div>
+    <div class="topbar-right">
+      <div class="stat-chip">
+        <span class="stat-label">AGENTS</span>
+        <span class="stat-value" id="statAgents">0</span>
+      </div>
+      <div class="stat-chip">
+        <span class="stat-label">TASKS</span>
+        <span class="stat-value" id="statTasks">0</span>
+      </div>
+      <div class="stat-chip">
+        <span class="stat-label">ARTIFACTS</span>
+        <span class="stat-value" id="statArtifacts">0</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- ═══════════════════════════════════════════════════════════
+       MAIN LAYOUT: 3 COLUMNS
+       ═══════════════════════════════════════════════════════════ -->
+  <main class="layout">
+
+    <!-- LEFT PANEL: Project launcher + project list -->
+    <aside class="panel panel-left">
+      <div class="panel-header">
+        <h2>Projects</h2>
+        <button class="btn btn-primary" id="btnNewProject">+ New Build</button>
+      </div>
+
+      <!-- New project form (hidden by default) -->
+      <div class="new-project-form hidden" id="newProjectForm">
+        <input type="text" id="inputProjectName" placeholder="Project name" class="input" maxlength="200">
+        <textarea id="inputProjectBrief" placeholder="Describe what to build..." class="input textarea" rows="4" maxlength="10000"></textarea>
+        <div class="form-actions">
+          <button class="btn btn-ghost" id="btnCancelProject">Cancel</button>
+          <button class="btn btn-launch" id="btnLaunchSwarm">Launch Swarm</button>
+        </div>
+      </div>
+
+      <!-- Project list -->
+      <div class="project-list" id="projectList">
+        <div class="empty-state">No projects yet. Launch a build to start.</div>
+      </div>
+    </aside>
+
+    <!-- CENTER PANEL: Live activity feed + task board -->
+    <section class="panel panel-center">
+      <div class="panel-tabs">
+        <button class="tab active" data-tab="activity">Live Feed</button>
+        <button class="tab" data-tab="tasks">Task Board</button>
+        <button class="tab" data-tab="agents">Agent Registry</button>
+      </div>
+
+      <!-- Tab: Live activity feed -->
+      <div class="tab-content active" id="tabActivity">
+        <div class="activity-feed" id="activityFeed">
+          <div class="empty-state">Select a project to see live activity.</div>
+        </div>
+      </div>
+
+      <!-- Tab: Task board -->
+      <div class="tab-content" id="tabTasks">
+        <div class="task-board">
+          <div class="task-column">
+            <div class="column-header">
+              <span class="column-dot dot-pending"></span>PENDING
+              <span class="column-count" id="countPending">0</span>
+            </div>
+            <div class="task-list" id="tasksPending"></div>
+          </div>
+          <div class="task-column">
+            <div class="column-header">
+              <span class="column-dot dot-active"></span>ACTIVE
+              <span class="column-count" id="countActive">0</span>
+            </div>
+            <div class="task-list" id="tasksActive"></div>
+          </div>
+          <div class="task-column">
+            <div class="column-header">
+              <span class="column-dot dot-waiting"></span>WAITING
+              <span class="column-count" id="countWaiting">0</span>
+            </div>
+            <div class="task-list" id="tasksWaiting"></div>
+          </div>
+          <div class="task-column">
+            <div class="column-header">
+              <span class="column-dot dot-completed"></span>DONE
+              <span class="column-count" id="countCompleted">0</span>
+            </div>
+            <div class="task-list" id="tasksCompleted"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: Agent registry -->
+      <div class="tab-content" id="tabAgents">
+        <div class="agent-grid" id="agentGrid">
+          <div class="empty-state">No agents spawned yet.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- RIGHT PANEL: Artifact viewer + inject -->
+    <aside class="panel panel-right">
+      <div class="panel-header">
+        <h2>Artifacts</h2>
+        <button class="btn btn-ghost btn-sm" id="btnRefreshArtifacts">Refresh</button>
+      </div>
+
+      <div class="artifact-list" id="artifactList">
+        <div class="empty-state">Artifacts will appear here as agents produce work.</div>
+      </div>
+
+      <!-- Artifact detail viewer -->
+      <div class="artifact-detail hidden" id="artifactDetail">
+        <div class="detail-header">
+          <h3 id="detailName"></h3>
+          <button class="btn btn-ghost btn-sm" id="btnCloseDetail">Close</button>
+        </div>
+        <div class="detail-meta" id="detailMeta"></div>
+        <pre class="detail-content" id="detailContent"></pre>
+      </div>
+
+      <!-- Inject requirement -->
+      <div class="inject-section">
+        <h3>Inject Requirement</h3>
+        <textarea id="inputInject" placeholder="Add a new requirement mid-build..." class="input textarea" rows="2"></textarea>
+        <button class="btn btn-warning btn-sm" id="btnInject">Inject</button>
+      </div>
+    </aside>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

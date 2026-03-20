@@ -1,0 +1,23 @@
+# Core
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+
+# Database
+asyncpg==0.30.0
+redis[hiredis]==5.2.1
+
+# LLM
+litellm==1.55.8
+
+# Embeddings (optional — for long-term memory semantic search)
+sentence-transformers==3.3.1
+
+# Async file I/O
+aiofiles==24.1.0
+
+# Web search (optional)
+duckduckgo-search==7.2.1
+
+# Utilities
+python-dotenv==1.0.1
