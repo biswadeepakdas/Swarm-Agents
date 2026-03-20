@@ -163,10 +163,11 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.getenv("PORT", "8000"))
+    is_dev = os.getenv("RAILWAY_ENVIRONMENT") is None
     uvicorn.run(
         "swarm.main:app",
         host="0.0.0.0",
         port=port,
-        reload=True,
+        reload=is_dev,
         log_level="info",
     )

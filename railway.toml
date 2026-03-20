@@ -2,7 +2,7 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "python -m uvicorn swarm.main:app --host 0.0.0.0 --port ${PORT:-8000}"
+startCommand = "python -m swarm.main"
 healthcheckPath = "/api/health"
 healthcheckTimeout = 300
 restartPolicyType = "ON_FAILURE"
