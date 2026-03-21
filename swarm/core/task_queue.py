@@ -215,6 +215,14 @@ class TaskQueue:
         except Exception:
             pass  # If check fails, proceed anyway
 
+        # Atomic lock: use Redis SETNX to prevent duplicate spawns for same task
+        lock_key = f"swarm:task_lock:{task.id}"
+        got_lock = await self.redis.client.set(lock_key, self._consumer_name, nx=True, ex=300)
+        if not got_lock:
+            logger.info(f"Skipping duplicate task {task.id} (locked by another worker)")
+            await self.redis.ack_task(msg_id)
+            return
+
         task.status = TaskStatus.ACTIVE
         task.started_at = datetime.now(timezone.utc)
 

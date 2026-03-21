@@ -16,8 +16,9 @@ litellm==1.55.8
 # Async file I/O
 aiofiles==24.1.0
 
-# Web search (optional)
-duckduckgo-search==7.2.1
+# Web search
+duckduckgo-search>=6.0.0
+httpx>=0.25.0
 
 # Utilities
 python-dotenv==1.0.1
