@@ -26,31 +26,28 @@ logger = logging.getLogger("swarm.environment")
 
 # Reactive trigger rules: artifact type → task(s) to auto-submit
 # This is THE chain that drives the entire swarm.
-# requirements_doc → architecture → decompose → build/design/test → review → deploy
+# requirements_doc → architecture → decompose → build/design/test → review
+#
+# IMPORTANT: Triggers that can loop (code→review→fix→code) are guarded
+# by depth tracking in _fire_reactive_triggers() below.
 REACTIVE_TRIGGERS: dict[ArtifactType, list[dict[str, Any]]] = {
-    # ── CRITICAL: This was MISSING — broke the entire agent chain ──
+    # ── Stage 1: Requirements → Architecture ──
     ArtifactType.REQUIREMENTS_DOC: [
         {"type": TaskType.PLAN_ARCHITECTURE, "priority": TaskPriority.CRITICAL, "label": "Architecture from requirements"},
     ],
 
     # architecture_plan is handled specially below (decompose into build tasks)
-    # but also trigger a database design task immediately
-    ArtifactType.ARCHITECTURE_PLAN: [],  # handled specially — decompose into build tasks
+    ArtifactType.ARCHITECTURE_PLAN: [],
+
+    # ── Stage 2: Build artifacts → one round of review ──
+    # Code file → review (depth-limited to prevent code→review→fix→code loop)
+    ArtifactType.CODE_FILE: [
+        {"type": TaskType.REVIEW_CODE, "priority": TaskPriority.HIGH, "label": "Auto-review code"},
+    ],
 
     # Database schema → trigger API creation
     ArtifactType.DATABASE_SCHEMA: [
         {"type": TaskType.CREATE_API, "priority": TaskPriority.HIGH, "label": "API from database schema"},
-    ],
-
-    # Code file → auto-review + auto-test
-    ArtifactType.CODE_FILE: [
-        {"type": TaskType.REVIEW_CODE, "priority": TaskPriority.HIGH, "label": "Auto-review code"},
-        {"type": TaskType.WRITE_TESTS, "priority": TaskPriority.NORMAL, "label": "Auto-test for code"},
-    ],
-
-    # API spec → generate tests
-    ArtifactType.API_SPEC: [
-        {"type": TaskType.WRITE_TESTS, "priority": TaskPriority.NORMAL, "label": "Auto-test for API spec"},
     ],
 
     # Frontend component → review
@@ -63,28 +60,20 @@ REACTIVE_TRIGGERS: dict[ArtifactType, list[dict[str, Any]]] = {
         {"type": TaskType.BUILD_FRONTEND_COMPONENT, "priority": TaskPriority.HIGH, "label": "Build UI from design"},
     ],
 
-    # Test suite → generate docs when tests pass
-    ArtifactType.TEST_SUITE: [
-        {"type": TaskType.WRITE_DOCS, "priority": TaskPriority.LOW, "label": "Document tested code"},
-    ],
-
-    # Bug report → auto-debug
-    ArtifactType.BUG_REPORT: [
-        {"type": TaskType.DEBUG, "priority": TaskPriority.HIGH, "label": "Auto-debug"},
-    ],
-
-    # Review with issues is handled specially below
-    ArtifactType.REVIEW: [],
-
-    # Documentation → no auto-trigger (terminal node)
-    ArtifactType.DOCUMENTATION: [],
-
-    # Deployment config → no auto-trigger (terminal node)
-    ArtifactType.DEPLOYMENT_CONFIG: [],
-
-    # Decision → no auto-trigger
-    ArtifactType.DECISION: [],
+    # ── Terminal nodes — NO further triggers to prevent infinite loops ──
+    ArtifactType.REVIEW: [],         # handled specially below (issue → fix, max 1 round)
+    ArtifactType.TEST_SUITE: [],     # terminal
+    ArtifactType.DOCUMENTATION: [],  # terminal
+    ArtifactType.DEPLOYMENT_CONFIG: [],  # terminal
+    ArtifactType.DECISION: [],       # terminal
+    ArtifactType.BUG_REPORT: [],     # terminal
+    ArtifactType.API_SPEC: [],       # terminal
 }
+
+# Max depth for reactive trigger chains to prevent infinite loops
+# depth 0 = original build task, depth 1 = review triggered by build,
+# depth 2 = fix triggered by review → STOP (no more reviews after a fix)
+MAX_TRIGGER_DEPTH = 2
 
 
 class Environment:
@@ -191,8 +180,40 @@ class Environment:
 
     # ── Reactive triggers ─────────────────────────────────────────
 
+    async def _get_trigger_depth(self, artifact: Artifact) -> int:
+        """
+        Get the current trigger depth from the task that produced this artifact.
+        Uses trigger_depth stored in task payload — no DB walks needed.
+        """
+        try:
+            # Look up the task that produced this artifact
+            tasks = await self.db.get_tasks(artifact.project_id)
+            for t in tasks:
+                if str(t.get("id", "")) == str(artifact.task_id):
+                    payload = t.get("payload", {})
+                    if isinstance(payload, str):
+                        import json as _json
+                        try:
+                            payload = _json.loads(payload)
+                        except Exception:
+                            payload = {}
+                    return int(payload.get("trigger_depth", 0))
+        except Exception:
+            pass
+        return 0
+
     async def _fire_reactive_triggers(self, artifact: Artifact) -> None:
         if not self.task_queue:
+            return
+
+        # ── Depth check: prevent infinite trigger loops ──
+        # code(0) → review(1) → fix(2) → STOP. No more reviews after a fix.
+        depth = await self._get_trigger_depth(artifact)
+        if depth >= MAX_TRIGGER_DEPTH:
+            logger.info(
+                f"Trigger depth {depth} >= {MAX_TRIGGER_DEPTH} for {artifact.type.value}. "
+                f"Stopping reactive chain to prevent infinite loop."
+            )
             return
 
         # Standard triggers from the map
@@ -206,6 +227,7 @@ class Environment:
                     "source_artifact_name": artifact.name,
                     "source_artifact_type": artifact.type.value,
                     "label": trigger.get("label", ""),
+                    "trigger_depth": depth + 1,
                 },
                 priority=trigger["priority"],
                 project_id=artifact.project_id,
@@ -214,12 +236,12 @@ class Environment:
             )
             await self.task_queue.submit(new_task)
             logger.info(
-                f"Reactive trigger: {artifact.type.value} → {trigger['type'].value} "
-                f"({trigger.get('label', '')})"
+                f"Reactive trigger (depth={depth+1}): {artifact.type.value} → "
+                f"{trigger['type'].value} ({trigger.get('label', '')})"
             )
 
-        # Special: review with issues → spawn fix task
-        if artifact.type == ArtifactType.REVIEW:
+        # Special: review with issues → spawn fix task (only if depth allows)
+        if artifact.type == ArtifactType.REVIEW and depth < MAX_TRIGGER_DEPTH:
             metadata = artifact.metadata or {}
             if metadata.get("has_issues", False):
                 fix_task = Task(
@@ -228,6 +250,7 @@ class Environment:
                         "trigger": "reactive",
                         "review_artifact_id": artifact.id,
                         "issues": metadata.get("issues", []),
+                        "trigger_depth": depth + 1,
                     },
                     priority=TaskPriority.HIGH,
                     project_id=artifact.project_id,
@@ -235,7 +258,7 @@ class Environment:
                     spawned_by_agent_id=artifact.agent_id,
                 )
                 await self.task_queue.submit(fix_task)
-                logger.info("Reactive trigger: review with issues → fix_code")
+                logger.info(f"Reactive trigger (depth={depth+1}): review with issues → fix_code")
 
         # Special: architecture plan → decompose into build tasks
         if artifact.type == ArtifactType.ARCHITECTURE_PLAN:
