@@ -151,75 +151,79 @@ MODELS: dict[str, ModelConfig] = {
 # If no configured model is available, falls back to config.llm_model.
 
 TASK_ROUTING: dict[TaskType, list[str]] = {
-    # ── Architecture & planning — needs strong reasoning ──────────
-    # DeepSeek V3.2: excellent analytical reasoning
-    # Llama 405B: largest open model, great for complex planning
+    # ── ROUTING STRATEGY ──
+    # NVIDIA NIM models have different speed profiles:
+    # - Llama 3.3 70B: FAST (~1-3s per call) — best for iterative tool loops
+    # - Devstral 123B: MEDIUM (~3-5s) — best for code quality
+    # - DeepSeek V3.2: SLOW (~10-20s) — best for single complex reasoning
+    # - Llama 405B: SLOW (~10-20s) — best for single complex reasoning
+    #
+    # For tasks using tool loops (multiple LLM calls), prefer FAST models.
+    # For one-shot tasks, quality > speed.
+
+    # ── Architecture & planning — iterative (search + analyze) ────
     TaskType.ANALYZE_REQUIREMENTS: [
         "claude-sonnet", "gpt-4o",
-        "nvidia-deepseek-v3", "nvidia-llama-405b", "nvidia-devstral", "nvidia-llama",
+        "nvidia-llama", "nvidia-devstral", "nvidia-deepseek-v3",
     ],
     TaskType.PLAN_ARCHITECTURE: [
         "claude-sonnet", "gpt-4o",
-        "nvidia-deepseek-v3", "nvidia-llama-405b", "nvidia-devstral", "nvidia-llama",
+        "nvidia-llama", "nvidia-devstral", "nvidia-deepseek-v3",
     ],
     TaskType.RESEARCH: [
         "gpt-4o", "gemini-pro", "claude-sonnet",
-        "nvidia-deepseek-v3", "nvidia-llama-405b", "nvidia-llama",
+        "nvidia-llama", "nvidia-devstral", "nvidia-deepseek-v3",
     ],
 
-    # ── Code generation — needs strong code output ────────────────
-    # Devstral: Mistral's dedicated code model (123B MoE) — best for code
-    # DeepSeek V3.2: excellent at code generation
+    # ── Code generation — iterative (write + test + fix) ──────────
     TaskType.WRITE_CODE: [
         "claude-sonnet", "deepseek-coder", "gpt-4o",
-        "nvidia-devstral", "nvidia-deepseek-v3", "nvidia-llama",
+        "nvidia-devstral", "nvidia-llama", "nvidia-deepseek-v3",
     ],
     TaskType.CREATE_API: [
         "claude-sonnet", "deepseek-coder", "gpt-4o",
-        "nvidia-devstral", "nvidia-deepseek-v3", "nvidia-llama",
+        "nvidia-devstral", "nvidia-llama", "nvidia-deepseek-v3",
     ],
     TaskType.FIX_CODE: [
         "claude-sonnet", "deepseek-coder", "gpt-4o",
-        "nvidia-devstral", "nvidia-deepseek-v3", "nvidia-llama",
+        "nvidia-devstral", "nvidia-llama", "nvidia-deepseek-v3",
     ],
     TaskType.BUILD_FRONTEND_COMPONENT: [
         "claude-sonnet", "gpt-4o",
-        "nvidia-devstral", "nvidia-deepseek-v3", "nvidia-llama",
+        "nvidia-devstral", "nvidia-llama", "nvidia-deepseek-v3",
     ],
 
-    # ── Design — creative + analytical ────────────────────────────
+    # ── Design — moderate iteration ──────────────────────────────
     TaskType.DESIGN_UI: [
         "claude-sonnet", "gpt-4o",
-        "nvidia-llama-405b", "nvidia-deepseek-v3", "nvidia-llama",
+        "nvidia-llama", "nvidia-devstral", "nvidia-deepseek-v3",
     ],
     TaskType.DESIGN_DATABASE: [
         "claude-sonnet", "gpt-4o", "deepseek-coder",
-        "nvidia-devstral", "nvidia-deepseek-v3", "nvidia-llama",
+        "nvidia-devstral", "nvidia-llama", "nvidia-deepseek-v3",
     ],
 
-    # ── Review — analytical + reasoning ───────────────────────────
-    # DeepSeek V3.2: strong analytical capability
-    # Phi-4 reasoning: chain-of-thought reasoning (returns <think> tags)
+    # ── Review — mostly one-shot (read code + analyze) ────────────
     TaskType.REVIEW_CODE: [
         "claude-sonnet", "gpt-4o",
-        "nvidia-deepseek-v3", "nvidia-llama-405b", "nvidia-llama",
+        "nvidia-llama", "nvidia-deepseek-v3",
     ],
     TaskType.DEBUG: [
         "claude-sonnet", "deepseek-coder", "gpt-4o",
-        "nvidia-devstral", "nvidia-deepseek-v3", "nvidia-llama",
+        "nvidia-devstral", "nvidia-llama", "nvidia-deepseek-v3",
     ],
 
-    # ── Testing — code generation + analysis ──────────────────────
+    # ── Testing — iterative (write + run) ─────────────────────────
     TaskType.WRITE_TESTS: [
         "claude-sonnet", "deepseek-coder", "gpt-4o",
-        "nvidia-devstral", "nvidia-deepseek-v3", "nvidia-llama",
+        "nvidia-devstral", "nvidia-llama",
     ],
     TaskType.INTEGRATION_TEST: [
         "claude-sonnet", "gpt-4o",
-        "nvidia-devstral", "nvidia-deepseek-v3", "nvidia-llama",
+        "nvidia-devstral", "nvidia-llama",
     ],
 
-    # ── Docs & ops — lighter tasks (use smaller/faster models) ────
+    # ── Docs & ops — fast lightweight tasks ───────────────────────
     TaskType.WRITE_DOCS: [
         "gpt-4o-mini", "claude-haiku",
         "nvidia-llama", "nvidia-llama-3b",
@@ -230,7 +234,7 @@ TASK_ROUTING: dict[TaskType, list[str]] = {
     ],
     TaskType.RESOLVE_CONFLICT: [
         "claude-sonnet", "gpt-4o",
-        "nvidia-deepseek-v3", "nvidia-llama-405b", "nvidia-llama",
+        "nvidia-llama", "nvidia-deepseek-v3",
     ],
 }
 
