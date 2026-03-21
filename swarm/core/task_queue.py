@@ -75,6 +75,10 @@ class TaskQueue:
         """
         self._running = True
         await self.redis.ensure_consumer_group()
+        # Claim any orphaned pending messages from dead workers
+        claimed = await self.redis.claim_pending_tasks(self._consumer_name)
+        if claimed:
+            logger.warning(f"Claimed {claimed} orphaned tasks from previous workers")
         logger.info(f"Spawn loop started (consumer={self._consumer_name}, max_concurrency={config.max_concurrency})")
 
         import time as _time
@@ -133,7 +137,7 @@ class TaskQueue:
             for p in projects:
                 if p.get("status") != "active":
                     continue
-                pid = p["id"]
+                pid = str(p["id"])
                 tasks = await self.db.get_tasks(pid)
                 if not tasks:
                     continue
@@ -143,7 +147,7 @@ class TaskQueue:
                     await self.db.update_project(pid, status="completed")
                     await self.redis.publish_event({
                         "type": "project_completed",
-                        "project_id": pid,
+                        "project_id": str(pid),
                     })
                     logger.info(f"Project {pid} auto-completed (all {len(tasks)} tasks done)")
         except Exception:

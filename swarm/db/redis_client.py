@@ -50,14 +50,64 @@ class RedisClient:
         logger.debug(f"Task submitted to stream: {task_data.get('id')} (msg={msg_id})")
         return msg_id
 
+    async def claim_pending_tasks(self, consumer_name: str) -> int:
+        """Claim orphaned pending messages from dead consumers.
+        Called on startup so the new worker picks up unfinished tasks."""
+        try:
+            # Get all pending messages older than 60 seconds
+            pending = await self.client.xpending_range(
+                config.task_stream, config.task_group,
+                min="-", max="+", count=100,
+            )
+            claimed = 0
+            for entry in pending:
+                msg_id = entry["message_id"]
+                idle_ms = entry.get("time_since_delivered", 0)
+                # Claim messages idle for more than 60 seconds
+                if idle_ms > 60000:
+                    try:
+                        await self.client.xclaim(
+                            config.task_stream, config.task_group, consumer_name,
+                            min_idle_time=60000, message_ids=[msg_id],
+                        )
+                        claimed += 1
+                    except Exception:
+                        pass
+            if claimed:
+                logger.warning(f"Claimed {claimed} orphaned pending messages")
+            return claimed
+        except Exception as e:
+            logger.warning(f"Failed to claim pending tasks: {e}")
+            return 0
+
     async def read_tasks(self, consumer_name: str, count: int = 1, block: int = 5000) -> list[tuple[str, dict]]:
+        # First try to read pending messages (claimed but not acked by this consumer)
         results = await self.client.xreadgroup(
             config.task_group,
             consumer_name,
-            {config.task_stream: ">"},
+            {config.task_stream: "0"},  # "0" reads pending messages first
             count=count,
-            block=block,
+            block=0,  # Don't block for pending check
         )
+        # Filter out empty pending results
+        has_pending = False
+        if results:
+            for _stream, messages in results:
+                if messages:
+                    has_pending = True
+                    break
+
+        if has_pending:
+            pass  # Use the pending results
+        else:
+            # No pending, read new messages with blocking
+            results = await self.client.xreadgroup(
+                config.task_group,
+                consumer_name,
+                {config.task_stream: ">"},
+                count=count,
+                block=block,
+            )
         if not results:
             return []
         tasks = []
