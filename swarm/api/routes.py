@@ -397,6 +397,9 @@ async def list_project_files(project_id: str):
             ],
         }
     except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        logger.error(f"Project assembly failed: {tb}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

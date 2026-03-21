@@ -114,9 +114,13 @@ async def assemble_project(db: PostgresDB, project_id: str) -> dict[str, Any]:
     Returns: { "files": [{"path": ..., "content": ..., "type": ...}], "manifest": {...} }
     """
     # Get project and artifacts
-    project = await db.get_project(project_id)
+    project = await db.get_project(str(project_id))
     if not project:
         raise ValueError(f"Project {project_id} not found")
+
+    # Ensure project is a dict (asyncpg Record → dict)
+    if not isinstance(project, dict):
+        project = dict(project)
 
     artifacts = await db.query_artifacts(str(project_id))
     if not artifacts:
@@ -156,40 +160,46 @@ async def assemble_project(db: PostgresDB, project_id: str) -> dict[str, Any]:
             unique_artifacts.append(art)
 
     for art in unique_artifacts:
-        atype = art.get("type", "unknown")
-        content = art.get("content", "")
-        if not content:
-            continue
+        try:
+            atype = art.get("type", "unknown")
+            content = art.get("content", "")
+            if not content:
+                continue
 
-        # Check if artifact has an explicit file_path in metadata
-        metadata = art.get("metadata") or {}
-        if isinstance(metadata, str):
-            try:
-                metadata = json.loads(metadata)
-            except (json.JSONDecodeError, TypeError):
+            # Check if artifact has an explicit file_path in metadata
+            metadata = art.get("metadata") or {}
+            if isinstance(metadata, str):
+                try:
+                    metadata = json.loads(metadata)
+                except (json.JSONDecodeError, TypeError):
+                    metadata = {}
+            if not isinstance(metadata, dict):
                 metadata = {}
 
-        explicit_path = metadata.get("file_path")
+            explicit_path = metadata.get("file_path")
 
-        if explicit_path:
-            file_path = explicit_path
-        else:
-            # Use default path template
-            template = DEFAULT_PATHS.get(atype, "output/{name}")
-            safe_name = _sanitize_filename(art.get("name", "unnamed"))
-            ext = _guess_extension(art)
-            file_path = template.replace("{name}", safe_name + ext)
+            if explicit_path:
+                file_path = explicit_path
+            else:
+                # Use default path template
+                template = DEFAULT_PATHS.get(atype, "output/{name}")
+                safe_name = _sanitize_filename(art.get("name", "unnamed"))
+                ext = _guess_extension(art)
+                file_path = template.replace("{name}", safe_name + ext)
 
-        file_path = _deduplicate_path(file_path, used_paths)
-        used_paths.add(file_path)
+            file_path = _deduplicate_path(file_path, used_paths)
+            used_paths.add(file_path)
 
-        files.append({
-            "path": file_path,
-            "content": content,
-            "type": atype,
-            "artifact_name": art.get("name", ""),
-            "tags": art.get("tags", []),
-        })
+            files.append({
+                "path": file_path,
+                "content": content,
+                "type": atype,
+                "artifact_name": art.get("name", ""),
+                "tags": art.get("tags", []),
+            })
+        except Exception as e:
+            logger.warning(f"Skipping artifact assembly: {e}")
+            continue
 
     # Generate README
     project_name = project.get("name", "Swarm Project")
