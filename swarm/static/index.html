@@ -86,16 +86,18 @@
       <div class="tab-content" id="tabGraph">
         <div class="graph-container" id="graphContainer">
           <div class="graph-toolbar">
-            <div class="graph-legend" id="graphLegend"></div>
             <div class="graph-controls">
-              <button class="btn btn-ghost btn-sm" id="btnGraphReset" title="Reset zoom">Reset</button>
+              <button class="btn" id="btnGraphRefresh">&#8635; Refresh</button>
+              <button class="btn" id="btnGraphReset" title="Reset zoom">&#11036;</button>
               <label class="graph-toggle">
                 <input type="checkbox" id="chkEdgeLabels" checked>
-                <span>Labels</span>
+                <span>Show Edge Labels</span>
               </label>
             </div>
           </div>
           <svg id="graphSvg"></svg>
+          <!-- MiroFish: legend at bottom-left, overlaid on graph -->
+          <div class="graph-legend" id="graphLegend"></div>
           <div class="graph-detail-panel hidden" id="graphDetailPanel">
             <div class="graph-detail-header">
               <span id="graphDetailTitle"></span>

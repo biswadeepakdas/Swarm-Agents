@@ -713,7 +713,19 @@ async function loadGraph() {
   _graphLoading = false;
 }
 
-// ── Graph Renderer (MiroFish-style) ──────────────────────────
+// ── Graph Renderer (MiroFish-exact) ──────────────────────────
+// Reference: MiroFish GraphPanel.vue — white bg, solid circles,
+// thin gray edges, edge labels with white rect bg, node labels beside node.
+
+// MiroFish edge/node color constants
+const EDGE_COLOR = '#C0C0C0';
+const EDGE_ARTIFACT_COLOR = '#B39DDB';
+const NODE_STROKE = '#fff';
+const NODE_STROKE_DEAD = '#ccc';
+const HIGHLIGHT_COLOR = '#E91E63';
+const LABEL_COLOR = '#333';
+const EDGE_LABEL_COLOR = '#666';
+const EDGE_LABEL_BG = 'rgba(255,255,255,0.95)';
 
 function renderGraph() {
   const container = document.getElementById('graphContainer');
@@ -725,7 +737,7 @@ function renderGraph() {
 
   const rect = container.getBoundingClientRect();
   const width = rect.width || 800;
-  const height = (rect.height - 34) || 500;
+  const height = rect.height || 500;
 
   const svg = d3.select(svgEl)
     .attr('width', width)
@@ -738,19 +750,26 @@ function renderGraph() {
   const edgesData = _graphData.edges;
   if (nodesData.length === 0) return;
 
-  // Prep nodes
-  const nodes = nodesData.map(n => ({
-    id: n.id,
-    label: n.label || 'Agent',
-    status: n.status || 'dead',
-    task_type: n.task_type || '',
-    created_at: n.created_at,
-    died_at: n.died_at,
-  }));
+  // Prep nodes — initialize positions around center to prevent drift
+  const cx = width / 2, cy = height / 2;
+  const nodes = nodesData.map((n, i) => {
+    const angle = (2 * Math.PI * i) / nodesData.length;
+    const radius = Math.min(width, height) * 0.25;
+    return {
+      id: n.id,
+      label: n.label || 'Agent',
+      status: n.status || 'dead',
+      task_type: n.task_type || '',
+      created_at: n.created_at,
+      died_at: n.died_at,
+      x: cx + radius * Math.cos(angle),
+      y: cy + radius * Math.sin(angle),
+    };
+  });
 
   const nodeIds = new Set(nodes.map(n => n.id));
 
-  // Prep edges — compute curvature for multi-edges
+  // Prep edges — compute curvature for multi-edges (MiroFish quadratic Bezier)
   const edgePairCount = {};
   const edgePairIndex = {};
   const edges = [];
@@ -792,25 +811,32 @@ function renderGraph() {
   // Main group
   _graphG = svg.append('g');
 
-  // Zoom
+  // Zoom — MiroFish smooth
   _graphZoom = d3.zoom()
     .scaleExtent([0.1, 4])
     .on('zoom', (event) => _graphG.attr('transform', event.transform));
   svg.call(_graphZoom);
 
-  // Force simulation — MiroFish params
+  // Force simulation — MiroFish-exact params
+  // Strong center pull + forceX/Y to prevent drifting to corners
+  const nodeCount = nodes.length;
+  const chargeStrength = nodeCount <= 5 ? -300 : nodeCount <= 15 ? -400 : -500;
+  const linkDist = nodeCount <= 5 ? 120 : 150;
+  const centerPull = nodeCount <= 5 ? 0.08 : 0.04;
+
   _graphSim = d3.forceSimulation(nodes)
     .force('link', d3.forceLink(edges).id(d => d.id).distance(d => {
-      const base = 150;
-      return base + ((d.pairTotal || 1) - 1) * 50;
-    }))
-    .force('charge', d3.forceManyBody().strength(-400))
-    .force('center', d3.forceCenter(width / 2, height / 2))
-    .force('collide', d3.forceCollide(50))
-    .force('x', d3.forceX(width / 2).strength(0.04))
-    .force('y', d3.forceY(height / 2).strength(0.04));
+      return linkDist + ((d.pairTotal || 1) - 1) * 40;
+    }).strength(0.7))
+    .force('charge', d3.forceManyBody().strength(chargeStrength).distanceMax(500))
+    .force('center', d3.forceCenter(cx, cy).strength(0.1))
+    .force('collide', d3.forceCollide(40))
+    .force('x', d3.forceX(cx).strength(centerPull))
+    .force('y', d3.forceY(cy).strength(centerPull))
+    .alphaDecay(0.02)
+    .velocityDecay(0.4);
 
-  // ── Draw edges ──────────────────────────────────────────────
+  // ── Draw edges — MiroFish: thin gray, no glow ──────────────
 
   const linkGroup = _graphG.append('g').attr('class', 'links');
 
@@ -824,9 +850,9 @@ function renderGraph() {
     const baseOffset = Math.max(35, dist * offsetRatio);
     const ox = (-dy / dist) * d.curvature * baseOffset;
     const oy = (dx / dist) * d.curvature * baseOffset;
-    const cx = (sx + tx) / 2 + ox;
-    const cy = (sy + ty) / 2 + oy;
-    return `M${sx},${sy} Q${cx},${cy} ${tx},${ty}`;
+    const qx = (sx + tx) / 2 + ox;
+    const qy = (sy + ty) / 2 + oy;
+    return `M${sx},${sy} Q${qx},${qy} ${tx},${ty}`;
   }
 
   function getLinkMid(d) {
@@ -839,115 +865,120 @@ function renderGraph() {
     const baseOffset = Math.max(35, dist * offsetRatio);
     const ox = (-dy / dist) * d.curvature * baseOffset;
     const oy = (dx / dist) * d.curvature * baseOffset;
-    const cx = (sx + tx) / 2 + ox;
-    const cy = (sy + ty) / 2 + oy;
-    return { x: 0.25 * sx + 0.5 * cx + 0.25 * tx, y: 0.25 * sy + 0.5 * cy + 0.25 * ty };
+    const qx = (sx + tx) / 2 + ox;
+    const qy = (sy + ty) / 2 + oy;
+    return { x: 0.25 * sx + 0.5 * qx + 0.25 * tx, y: 0.25 * sy + 0.5 * qy + 0.25 * ty };
   }
 
   const link = linkGroup.selectAll('path')
     .data(edges).enter().append('path')
-    .attr('stroke', d => d.edgeType === 'artifact' ? '#9b59b6' : '#505868')
+    .attr('stroke', d => d.edgeType === 'artifact' ? EDGE_ARTIFACT_COLOR : EDGE_COLOR)
     .attr('stroke-width', 1.5)
     .attr('fill', 'none')
     .attr('stroke-dasharray', d => d.edgeType === 'artifact' ? '5,3' : 'none')
     .style('cursor', 'pointer')
     .on('click', (event, d) => {
       event.stopPropagation();
-      link.attr('stroke', dd => dd.edgeType === 'artifact' ? '#9b59b6' : '#505868').attr('stroke-width', 1.5);
-      d3.select(event.target).attr('stroke', '#E91E63').attr('stroke-width', 3);
+      resetHighlight();
+      d3.select(event.target).attr('stroke', HIGHLIGHT_COLOR).attr('stroke-width', 3);
     });
 
-  // Edge label backgrounds
+  // Edge label backgrounds — MiroFish: white rect with slight opacity
   const linkLabelBg = linkGroup.selectAll('rect')
     .data(edges).enter().append('rect')
-    .attr('fill', 'rgba(18,21,27,0.85)')
+    .attr('fill', EDGE_LABEL_BG)
     .attr('rx', 3).attr('ry', 3)
     .style('pointer-events', 'none')
     .style('display', _showEdgeLabels ? 'block' : 'none');
   _linkLabelBgRef = linkLabelBg;
 
-  // Edge labels
+  // Edge labels — MiroFish: 9px, gray #666
   const linkLabels = linkGroup.selectAll('text')
     .data(edges).enter().append('text')
     .text(d => d.label)
     .attr('font-size', '9px')
-    .attr('fill', '#8b919e')
+    .attr('fill', EDGE_LABEL_COLOR)
     .attr('text-anchor', 'middle')
     .attr('dominant-baseline', 'middle')
     .style('pointer-events', 'none')
-    .style('font-family', "'JetBrains Mono', monospace")
+    .style('font-family', "'Inter', sans-serif")
     .style('display', _showEdgeLabels ? 'block' : 'none');
   _linkLabelsRef = linkLabels;
 
-  // ── Draw nodes ──────────────────────────────────────────────
+  // ── Draw nodes — MiroFish: solid circles, white stroke ─────
 
   const nodeGroup = _graphG.append('g').attr('class', 'nodes');
 
-  // MiroFish style: simple circles, white stroke, color fill
   const node = nodeGroup.selectAll('circle')
     .data(nodes).enter().append('circle')
     .attr('r', 10)
     .attr('fill', d => getPersonaColor(d.label))
-    .attr('stroke', d => (d.status === 'alive' || d.status === 'working') ? '#fff' : '#2a2f3a')
+    .attr('stroke', NODE_STROKE)
     .attr('stroke-width', 2.5)
-    .attr('opacity', d => d.status === 'dead' ? 0.5 : 1)
+    .attr('opacity', d => d.status === 'dead' ? 0.45 : 1)
     .style('cursor', 'pointer')
     .call(d3.drag()
       .on('start', (event, d) => {
+        if (!event.active) _graphSim.alphaTarget(0.3).restart();
         d.fx = d.x; d.fy = d.y;
         d._dragStartX = event.x; d._dragStartY = event.y; d._isDragging = false;
       })
       .on('drag', (event, d) => {
-        const dx = event.x - d._dragStartX, dy = event.y - d._dragStartY;
-        if (!d._isDragging && Math.sqrt(dx * dx + dy * dy) > 3) {
+        const ddx = event.x - d._dragStartX, ddy = event.y - d._dragStartY;
+        if (!d._isDragging && Math.sqrt(ddx * ddx + ddy * ddy) > 3) {
           d._isDragging = true;
-          _graphSim.alphaTarget(0.3).restart();
         }
-        if (d._isDragging) { d.fx = event.x; d.fy = event.y; }
+        d.fx = event.x; d.fy = event.y;
       })
       .on('end', (event, d) => {
-        if (d._isDragging) _graphSim.alphaTarget(0);
+        if (!event.active) _graphSim.alphaTarget(0);
         d.fx = null; d.fy = null; d._isDragging = false;
       })
     )
     .on('click', (event, d) => {
       event.stopPropagation();
-      // Reset
-      node.attr('stroke', dd => (dd.status === 'alive' || dd.status === 'working') ? '#fff' : '#2a2f3a').attr('stroke-width', 2.5);
-      link.attr('stroke', dd => dd.edgeType === 'artifact' ? '#9b59b6' : '#505868').attr('stroke-width', 1.5);
-      // Highlight selected
-      d3.select(event.target).attr('stroke', '#E91E63').attr('stroke-width', 4);
+      resetHighlight();
+      // Highlight selected node
+      d3.select(event.target).attr('stroke', HIGHLIGHT_COLOR).attr('stroke-width', 4);
       // Highlight connected edges
       link.filter(l => l.source.id === d.id || l.target.id === d.id)
-        .attr('stroke', '#E91E63').attr('stroke-width', 2.5);
+        .attr('stroke', HIGHLIGHT_COLOR).attr('stroke-width', 2.5);
       showGraphDetail(d);
     })
-    .on('mouseenter', (event, d) => {
-      d3.select(event.target).attr('stroke-width', 3.5);
-    })
-    .on('mouseleave', (event, d) => {
+    .on('mouseenter', (event) => {
       const sel = d3.select(event.target);
-      if (sel.attr('stroke') !== '#E91E63') sel.attr('stroke-width', 2.5);
+      if (sel.attr('stroke') !== HIGHLIGHT_COLOR) sel.attr('stroke-width', 3.5);
+    })
+    .on('mouseleave', (event) => {
+      const sel = d3.select(event.target);
+      if (sel.attr('stroke') !== HIGHLIGHT_COLOR) sel.attr('stroke-width', 2.5);
     });
 
-  // Node labels (beside the node, not centered)
+  // Node labels — MiroFish: 11px, #333, font-weight 500, beside node (dx=14, dy=4)
   const nodeLabels = nodeGroup.selectAll('text')
     .data(nodes).enter().append('text')
     .text(d => {
       const l = d.label || 'Agent';
-      return l.length > 14 ? l.substring(0, 12) + '...' : l;
+      return l.length > 18 ? l.substring(0, 16) + '...' : l;
     })
-    .attr('font-size', '10px')
-    .attr('fill', '#c8ccd4')
+    .attr('font-size', '11px')
+    .attr('fill', LABEL_COLOR)
     .attr('font-weight', '500')
     .attr('dx', 14)
     .attr('dy', 4)
     .style('pointer-events', 'none')
     .style('font-family', "'Inter', sans-serif");
 
-  // ── Tick ────────────────────────────────────────────────────
+  // ── Tick — update positions ────────────────────────────────
 
   _graphSim.on('tick', () => {
+    // Constrain nodes within bounds (with padding)
+    const pad = 30;
+    nodes.forEach(d => {
+      d.x = Math.max(pad, Math.min(width - pad, d.x));
+      d.y = Math.max(pad, Math.min(height - pad, d.y));
+    });
+
     link.attr('d', d => getLinkPath(d));
 
     linkLabels.each(function(d) {
@@ -973,10 +1004,15 @@ function renderGraph() {
     nodeLabels.attr('x', d => d.x).attr('y', d => d.y);
   });
 
+  // Helper: reset all highlights back to MiroFish defaults
+  function resetHighlight() {
+    node.attr('stroke', NODE_STROKE).attr('stroke-width', 2.5);
+    link.attr('stroke', d => d.edgeType === 'artifact' ? EDGE_ARTIFACT_COLOR : EDGE_COLOR).attr('stroke-width', 1.5);
+  }
+
   // Click background to deselect
   svg.on('click', () => {
-    node.attr('stroke', d => (d.status === 'alive' || d.status === 'working') ? '#fff' : '#2a2f3a').attr('stroke-width', 2.5);
-    link.attr('stroke', d => d.edgeType === 'artifact' ? '#9b59b6' : '#505868').attr('stroke-width', 1.5);
+    resetHighlight();
     hideGraphDetail();
   });
 }
@@ -1032,13 +1068,17 @@ function renderGraphLegend(nodes) {
     if (!types[n.label]) types[n.label] = 0;
     types[n.label]++;
   });
-  legend.innerHTML = Object.entries(types).map(([label, count]) =>
-    `<div class="legend-item">
-      <span class="legend-dot" style="background:${getPersonaColor(label)}"></span>
-      <span class="legend-label">${escapeHtml(label)}</span>
-      <span class="legend-count">${count}</span>
-    </div>`
-  ).join('');
+  // MiroFish-exact: red "ENTITY TYPES" title + grid of dot+label items
+  legend.innerHTML =
+    `<div class="graph-legend-title">ENTITY TYPES</div>
+     <div class="graph-legend-grid">` +
+    Object.entries(types).map(([label]) =>
+      `<div class="legend-item">
+        <span class="legend-dot" style="background:${getPersonaColor(label)}"></span>
+        <span class="legend-label">${escapeHtml(label)}</span>
+      </div>`
+    ).join('') +
+    `</div>`;
 }
 
 // ── Graph controls ────────────────────────────────────────────
@@ -1047,6 +1087,10 @@ document.getElementById('btnGraphReset')?.addEventListener('click', () => {
   if (_graphZoom) {
     d3.select('#graphSvg').transition().duration(400).call(_graphZoom.transform, d3.zoomIdentity);
   }
+});
+
+document.getElementById('btnGraphRefresh')?.addEventListener('click', () => {
+  if (state.activeProjectId) loadGraph();
 });
 
 document.getElementById('chkEdgeLabels')?.addEventListener('change', (e) => {
