@@ -203,6 +203,18 @@ class TaskQueue:
         from swarm.core.agent import SwarmAgent
 
         task = Task.from_dict(task_data)
+
+        # Deduplication: skip if task is already completed/active/dead
+        try:
+            existing = await self.db.get_tasks(task.project_id)
+            for t in existing:
+                if t["id"] == task.id and t.get("status") in ("completed", "active", "dead"):
+                    logger.info(f"Skipping duplicate task {task.id} (already {t['status']})")
+                    await self.redis.ack_task(msg_id)
+                    return
+        except Exception:
+            pass  # If check fails, proceed anyway
+
         task.status = TaskStatus.ACTIVE
         task.started_at = datetime.now(timezone.utc)
 
