@@ -344,6 +344,14 @@ function handleSwarmEvent(event) {
       dom.statArtifacts.textContent = parseInt(dom.statArtifacts.textContent) + 1;
       break;
 
+    case 'agent_progress':
+      addFeedItem('task',
+        `<strong>${event.agent_name || 'Agent'}</strong> ` +
+        `<span class="tag">${event.phase}</span> ` +
+        (event.detail ? `— ${escapeHtml(event.detail)}` : '')
+      );
+      break;
+
     case 'llm_usage':
       // Silent — just track
       break;

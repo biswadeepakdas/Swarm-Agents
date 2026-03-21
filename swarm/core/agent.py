@@ -92,6 +92,21 @@ class SwarmAgent:
         self._model = config.llm_model
         self._max_tokens = config.llm_max_tokens_per_agent
 
+    async def _emit_progress(self, phase: str, detail: str = "") -> None:
+        """Emit a real-time progress event so the user sees what's happening."""
+        try:
+            await self.redis.publish_event({
+                "type": "agent_progress",
+                "agent_id": self.identity.id,
+                "agent_name": self.identity.name,
+                "project_id": self.task.project_id,
+                "task_type": self.task.type.value,
+                "phase": phase,
+                "detail": detail,
+            })
+        except Exception:
+            pass  # Never let progress events break the agent
+
     async def execute(self) -> dict[str, Any]:
         """
         Main agent lifecycle:
@@ -103,19 +118,25 @@ class SwarmAgent:
         6. Update memory
         7. Die
         """
+        import time as _time
+
         logger.info(f"Agent {self.identity.name} BORN for task {self.task.id} ({self.task.type.value})")
 
         # 1. Register
         await self._register()
+        await self._emit_progress("registered", "Agent online, loading context...")
 
         try:
             # 2. Load project context
             env_context = await self.environment.get_project_state(self.task.project_id)
+            await self._emit_progress("context_loaded", f"Loaded project state ({len(env_context)} chars)")
 
             # 3. Discover relevant artifacts
             relevant_artifacts = await self.interaction.discover_relevant_artifacts(
                 self.task.project_id, self.task
             )
+            art_count = len(relevant_artifacts) if relevant_artifacts else 0
+            await self._emit_progress("artifacts_discovered", f"Found {art_count} relevant artifact(s)")
 
             # 4. Build prompt and call LLM
             system_prompt = await self._build_system_prompt(env_context, relevant_artifacts)
@@ -126,10 +147,18 @@ class SwarmAgent:
                 "result": f"Sending prompt ({len(system_prompt)} chars system, {len(user_prompt)} chars user)",
             })
 
+            await self._emit_progress("calling_llm", f"Sending {len(system_prompt) + len(user_prompt)} chars to {self._model}...")
+
+            t0 = _time.time()
             llm_response = await self._call_llm(system_prompt, user_prompt)
+            elapsed = _time.time() - t0
+
+            await self._emit_progress("llm_responded", f"LLM responded in {elapsed:.1f}s ({len(llm_response)} chars)")
 
             # 5. Parse and publish artifact
             artifact = self._parse_output(llm_response)
+            await self._emit_progress("publishing", f"Publishing {artifact.type.value}: {artifact.name}")
+
             await self.environment.publish_artifact(artifact)
 
             await self.memory.append_reasoning({
@@ -147,6 +176,7 @@ class SwarmAgent:
 
             # 7. Die
             await self._die()
+            await self._emit_progress("completed", f"Done in {_time.time() - t0:.1f}s total")
 
             return {
                 "artifact_id": artifact.id,
@@ -156,6 +186,7 @@ class SwarmAgent:
 
         except Exception as e:
             logger.exception(f"Agent {self.identity.name} failed: {e}")
+            await self._emit_progress("failed", str(e)[:200])
             await self._die(error=str(e))
             raise
 
@@ -257,7 +288,8 @@ class SwarmAgent:
     # ── LLM call ──────────────────────────────────────────────────
 
     async def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
-        """Call the LLM via litellm. Supports Anthropic, NVIDIA NIM, OpenAI, etc."""
+        """Call the LLM via litellm with explicit timeout. Supports Anthropic, NVIDIA NIM, OpenAI, etc."""
+        import asyncio as _asyncio
         import os
 
         # Set provider-specific env vars for litellm auto-detection
@@ -269,22 +301,34 @@ class SwarmAgent:
             else:
                 os.environ.setdefault("OPENAI_API_KEY", config.llm_api_key)
 
+        llm_timeout = 90  # seconds — hard cap on any single LLM call
+
         try:
-            response = await litellm.acompletion(
-                model=self._model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                max_tokens=self._max_tokens,
-                temperature=0.7,
-                api_key=config.llm_api_key,
+            logger.info(f"Agent {self.identity.id} calling LLM model={self._model} timeout={llm_timeout}s")
+
+            response = await _asyncio.wait_for(
+                litellm.acompletion(
+                    model=self._model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    max_tokens=self._max_tokens,
+                    temperature=0.7,
+                    api_key=config.llm_api_key,
+                    timeout=llm_timeout,  # litellm's own timeout
+                ),
+                timeout=llm_timeout + 10,  # asyncio hard timeout (slightly longer)
             )
             content = response.choices[0].message.content
 
             # Track token usage
             usage = response.usage
             if usage:
+                logger.info(
+                    f"Agent {self.identity.id} LLM usage: "
+                    f"prompt={usage.prompt_tokens} completion={usage.completion_tokens}"
+                )
                 await self.redis.publish_event({
                     "type": "llm_usage",
                     "agent_id": self.identity.id,
@@ -296,8 +340,15 @@ class SwarmAgent:
 
             return content
 
+        except _asyncio.TimeoutError:
+            err = f"LLM call timed out after {llm_timeout}s (model={self._model})"
+            logger.error(f"Agent {self.identity.id}: {err}")
+            await self._emit_progress("llm_timeout", err)
+            raise TimeoutError(err)
+
         except Exception as e:
             logger.error(f"LLM call failed for agent {self.identity.id}: {e}")
+            await self._emit_progress("llm_error", f"{type(e).__name__}: {str(e)[:150]}")
             raise
 
     # ── Output parsing ────────────────────────────────────────────

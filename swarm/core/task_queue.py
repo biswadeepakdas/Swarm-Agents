@@ -78,7 +78,7 @@ class TaskQueue:
 
         while self._running:
             try:
-                messages = await self.redis.read_tasks(self._consumer_name, count=1, block=2000)
+                messages = await self.redis.read_tasks(self._consumer_name, count=1, block=500)
                 if not messages:
                     # Clean up finished agent tasks
                     self._cleanup_finished()
@@ -122,6 +122,17 @@ class TaskQueue:
 
         try:
             await self.db.update_task(task.id, status="active", started_at=task.started_at)
+
+            # Emit progress so the user knows something is happening
+            await self.redis.publish_event({
+                "type": "agent_progress",
+                "agent_id": "",
+                "agent_name": "Spawn Loop",
+                "project_id": task.project_id,
+                "task_type": task.type.value,
+                "phase": "task_picked_up",
+                "detail": f"Processing {task.type.value} task (id={task.id[:8]}...)",
+            })
 
             # Check if environment has unmet dependencies
             if self.environment and task.dependencies:
