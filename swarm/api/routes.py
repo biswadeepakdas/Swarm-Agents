@@ -204,45 +204,67 @@ async def get_graph(project_id: str):
     # Build node + edge sets
     nodes = []
     edges = []
-    agent_map = {}  # agent_id → node index
-    task_map = {}   # task_id → agent that executed it
+    agent_map = {}   # agent_id → node index
+    task_agent = {}  # task_id → agent_id (which agent executed it)
 
-    # Map tasks to their assigned agents
+    # Build task_id → agent_id mapping from both sides
+    for a in agents:
+        aid = str(a.get("id", ""))
+        tid = str(a.get("task_id", ""))
+        if aid and tid:
+            task_agent[tid] = aid
+
     for t in tasks:
-        if t.get("assigned_agent_id"):
-            task_map[t["id"]] = t["assigned_agent_id"]
+        tid = str(t.get("id", ""))
+        assignee = t.get("assigned_agent_id")
+        if assignee and tid:
+            task_agent[tid] = assignee
 
     # Agent nodes
     for i, a in enumerate(agents):
         aid = str(a.get("id", ""))
         agent_map[aid] = i
         persona = a.get("persona") or a.get("name") or "Agent"
+        # Extract task_type from personality dict
         task_type = ""
-        if a.get("personality"):
-            p = a["personality"]
-            task_type = p.get("task_type", "") if isinstance(p, dict) else ""
+        personality = a.get("personality")
+        if personality and isinstance(personality, dict):
+            task_type = personality.get("task_type", "")
+        elif personality and isinstance(personality, str):
+            try:
+                import json as _json
+                p = _json.loads(personality)
+                task_type = p.get("task_type", "")
+            except Exception:
+                pass
         nodes.append({
             "id": aid,
             "label": persona,
             "type": "agent",
             "status": a.get("status", "dead"),
-            "task_type": task_type or a.get("task_id", ""),
+            "task_type": task_type,
             "created_at": str(a.get("created_at", "")),
             "died_at": str(a.get("died_at", "")),
         })
 
-    # Edges: parent_task → child_task (agent spawned another agent's task)
+    # Edges: spawner agent → child agent (via spawned_by_agent_id or parent_task_id)
     for t in tasks:
         spawner = t.get("spawned_by_agent_id")
-        assignee = t.get("assigned_agent_id")
-        if spawner and assignee and spawner in agent_map and assignee in agent_map:
-            edges.append({
-                "source": spawner,
-                "target": assignee,
-                "label": t.get("type", "task"),
-                "type": "spawned",
-                "status": t.get("status", "pending"),
-            })
+        assignee = t.get("assigned_agent_id") or task_agent.get(str(t.get("id", "")))
+
+        # If no direct spawner, try to find via parent_task_id
+        if not spawner and t.get("parent_task_id"):
+            spawner = task_agent.get(str(t["parent_task_id"]))
+
+        if spawner and assignee and spawner != assignee:
+            if spawner in agent_map and assignee in agent_map:
+                edges.append({
+                    "source": spawner,
+                    "target": assignee,
+                    "label": t.get("type", "task"),
+                    "type": "spawned",
+                    "status": t.get("status", "pending"),
+                })
 
     # Edges: artifact flow (agent produces artifact → triggers another agent)
     for art in artifacts:
@@ -250,16 +272,30 @@ async def get_graph(project_id: str):
         art_type = art.get("type", "")
         art_tags = art.get("tags", []) if isinstance(art.get("tags"), list) else []
 
-        # Find agents that consumed this artifact (via task dependencies)
+        # Find agents that consumed this artifact (via task dependencies or reactive trigger)
         for t in tasks:
-            consumer = t.get("assigned_agent_id")
+            consumer = t.get("assigned_agent_id") or task_agent.get(str(t.get("id", "")))
             deps = t.get("dependencies", []) if isinstance(t.get("dependencies"), list) else []
-            if consumer and consumer != producer and consumer in agent_map and producer in agent_map:
-                if any(tag in deps for tag in art_tags):
+
+            # Check by dependency tags
+            tag_match = any(tag in deps for tag in art_tags) if art_tags and deps else False
+
+            # Check by reactive trigger reference
+            payload = t.get("payload", {}) or {}
+            if isinstance(payload, str):
+                try:
+                    import json as _json
+                    payload = _json.loads(payload)
+                except Exception:
+                    payload = {}
+            trigger_match = payload.get("source_artifact_id") == art.get("id")
+
+            if consumer and consumer != producer and (tag_match or trigger_match):
+                if consumer in agent_map and producer in agent_map:
                     edges.append({
                         "source": producer,
                         "target": consumer,
-                        "label": art_type,
+                        "label": art_type or t.get("type", ""),
                         "type": "artifact",
                         "status": "completed",
                     })

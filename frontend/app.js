@@ -95,6 +95,7 @@ dom.btnLaunchSwarm.addEventListener('click', async () => {
   const brief = dom.inputProjectBrief.value.trim();
   if (!name || brief.length < 10) {
     shakeElement(dom.inputProjectBrief);
+    showToast('Brief must be at least 10 characters.', 'warn');
     return;
   }
 
@@ -112,14 +113,17 @@ dom.btnLaunchSwarm.addEventListener('click', async () => {
       dom.newProjectForm.classList.add('hidden');
       dom.inputProjectName.value = '';
       dom.inputProjectBrief.value = '';
-      addFeedItem('task', `Project <strong>${name}</strong> created. Swarm activated.`);
+      addFeedItem('task', `Project <strong>${escapeHtml(name)}</strong> created. Swarm activated.`);
+      showToast('Swarm launched. Agents are spawning.', 'ok');
       await loadProjects();
       selectProject(data.id);
     } else {
       addFeedItem('fail', `Failed to create project: ${data.detail || 'Unknown error'}`);
+      showToast(`Launch failed: ${data.detail || 'Unknown'}`, 'error');
     }
   } catch (err) {
     addFeedItem('fail', `Network error: ${err.message}`);
+    showToast(`Network error: ${err.message}`, 'error');
   } finally {
     dom.btnLaunchSwarm.disabled = false;
     dom.btnLaunchSwarm.textContent = 'Launch Swarm';
@@ -129,9 +133,18 @@ dom.btnLaunchSwarm.addEventListener('click', async () => {
 // ── Inject requirement ───────────────────────────────────────
 
 dom.btnInject.addEventListener('click', async () => {
-  if (!state.activeProjectId) return;
+  if (!state.activeProjectId) {
+    showToast('Select a project first.', 'warn');
+    return;
+  }
   const text = dom.inputInject.value.trim();
-  if (text.length < 5) return;
+  if (text.length < 5) {
+    showToast('Requirement too short (min 5 chars).', 'warn');
+    return;
+  }
+
+  dom.btnInject.disabled = true;
+  dom.btnInject.textContent = 'Injecting...';
 
   try {
     const res = await fetch(`${API_BASE}/projects/${state.activeProjectId}/inject`, {
@@ -140,11 +153,21 @@ dom.btnInject.addEventListener('click', async () => {
       body: JSON.stringify({ requirement: text }),
     });
     if (res.ok) {
-      addFeedItem('task', `Requirement injected: <strong>${text.slice(0, 60)}...</strong>`);
+      addFeedItem('task', `Requirement injected: <strong>${escapeHtml(text.slice(0, 60))}...</strong>`);
+      showToast('Requirement injected. Agent will spawn shortly.', 'ok');
       dom.inputInject.value = '';
+      // Refresh data after short delay to let the spawn loop pick it up
+      setTimeout(() => { if (state.activeProjectId) refreshProject(state.activeProjectId); }, 3000);
+    } else {
+      const data = await res.json().catch(() => ({}));
+      showToast(`Inject failed: ${data.detail || res.statusText}`, 'error');
     }
   } catch (err) {
     addFeedItem('fail', `Inject failed: ${err.message}`);
+    showToast(`Network error: ${err.message}`, 'error');
+  } finally {
+    dom.btnInject.disabled = false;
+    dom.btnInject.textContent = 'Inject';
   }
 });
 
@@ -564,379 +587,393 @@ function shakeElement(el) {
   setTimeout(() => { el.style.borderColor = ''; }, 1500);
 }
 
+// ── Toast notifications ─────────────────────────────────────
+
+function showToast(message, type = 'ok') {
+  let container = document.getElementById('toastContainer');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'toastContainer';
+    container.className = 'toast-container';
+    document.body.appendChild(container);
+  }
+
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  const icons = { ok: '&#10003;', error: '&#10007;', warn: '&#9888;' };
+  toast.innerHTML = `<span class="toast-icon">${icons[type] || ''}</span><span>${message}</span>`;
+  container.appendChild(toast);
+
+  // Force reflow then animate in
+  toast.offsetHeight;
+  toast.classList.add('toast-visible');
+
+  setTimeout(() => {
+    toast.classList.remove('toast-visible');
+    setTimeout(() => toast.remove(), 300);
+  }, 4000);
+}
+
 // ── Init ─────────────────────────────────────────────────────
 
-addFeedItem('complete', 'Swarm Control dashboard loaded. Create a project to begin.');
+// Show system status
+addFeedItem('complete', 'Swarm Control initialized. Waiting for connection.');
 loadProjects();
 
 
 // ═══════════════════════════════════════════════════════════════
-// SWARM GRAPH — D3.js Force-Directed Visualization
-// MiroFish-inspired with animated agent spawning/dying
+// SWARM GRAPH — MiroFish-style Force-Directed Visualization
+// Clean nodes, Bezier curves, dot-grid, proper physics
 // ═══════════════════════════════════════════════════════════════
 
-const GRAPH_COLORS = {
-  // Agent persona → color mapping
-  'Product Manager':    '#FF6B35',
-  'System Architect':   '#004E89',
-  'Database Engineer':  '#fbbf24',
-  'UI/UX Designer':     '#e879f9',
-  'Backend Engineer':   '#34d399',
-  'Frontend Engineer':  '#22d3ee',
-  'Tech Lead':          '#a78bfa',
-  'QA Engineer':        '#f87171',
-  'Technical Writer':   '#8b919e',
-  'Research Analyst':   '#fb923c',
-  'DevOps Engineer':    '#4ade80',
-};
+const PERSONA_COLORS = [
+  '#FF6B35', '#004E89', '#7B2D8E', '#1A936F', '#C5283D',
+  '#E9724C', '#3498db', '#9b59b6', '#27ae60', '#f39c12', '#1abc9c'
+];
 
-const STATUS_GLOW = {
-  alive:   '#34d399',
-  working: '#34d399',
-  waiting: '#fb923c',
-  dead:    '#555c6b',
-};
+let _graphSim = null;
+let _graphData = { nodes: [], edges: [], stats: {} };
+let _graphZoom = null;
+let _graphG = null;
+let _showEdgeLabels = true;
+let _graphLoading = false;
+let _linkLabelsRef = null;
+let _linkLabelBgRef = null;
 
-let graphSim = null;
-let graphData = { nodes: [], edges: [] };
-let graphZoom = null;
-let graphG = null;
-let showEdgeLabels = true;
-let selectedGraphNode = null;
+// Build a stable color map for persona types
+const _personaColorMap = {};
+let _colorIdx = 0;
+function getPersonaColor(persona) {
+  if (!_personaColorMap[persona]) {
+    _personaColorMap[persona] = PERSONA_COLORS[_colorIdx % PERSONA_COLORS.length];
+    _colorIdx++;
+  }
+  return _personaColorMap[persona];
+}
 
-function getAgentColor(label) {
-  return GRAPH_COLORS[label] || '#4f8ff7';
+// ── Graph Loading ─────────────────────────────────────────────
+
+function setGraphState(stateStr) {
+  const container = document.getElementById('graphContainer');
+  if (!container) return;
+  const overlay = container.querySelector('.graph-state-overlay');
+  if (overlay) overlay.remove();
+
+  if (stateStr === 'none') return;
+
+  const div = document.createElement('div');
+  div.className = 'graph-state-overlay';
+
+  if (stateStr === 'loading') {
+    div.innerHTML = '<div class="graph-spinner"></div><p>Loading graph data...</p>';
+  } else if (stateStr === 'empty') {
+    div.innerHTML = '<div class="graph-empty-icon">&#10070;</div><p>No agents spawned yet.<br>Launch a project or inject a requirement.</p>';
+  } else if (stateStr === 'error') {
+    div.innerHTML = '<div class="graph-empty-icon" style="color:var(--red)">!</div><p>Failed to load graph.<br>The backend may be redeploying.</p>';
+  }
+  container.appendChild(div);
 }
 
 async function loadGraph() {
   if (!state.activeProjectId) return;
+  _graphLoading = true;
+  setGraphState('loading');
+
   try {
     const res = await origFetch(`${API_BASE}/projects/${state.activeProjectId}/graph`);
-    if (!res.ok) return;
+    if (!res.ok) {
+      setGraphState('error');
+      _graphLoading = false;
+      return;
+    }
     const data = await res.json();
-    graphData = { nodes: data.nodes || [], edges: data.edges || [] };
-    renderGraph();
+    _graphData = {
+      nodes: data.nodes || [],
+      edges: data.edges || [],
+      stats: data.stats || {},
+    };
+
+    if (_graphData.nodes.length === 0) {
+      setGraphState('empty');
+    } else {
+      setGraphState('none');
+      renderGraph();
+    }
   } catch (e) {
-    // Graph not available yet
+    setGraphState('error');
   }
+  _graphLoading = false;
 }
+
+// ── Graph Renderer (MiroFish-style) ──────────────────────────
 
 function renderGraph() {
   const container = document.getElementById('graphContainer');
-  const svg = d3.select('#graphSvg');
-  if (!container || !svg.node()) return;
+  const svgEl = document.getElementById('graphSvg');
+  if (!container || !svgEl) return;
+
+  // Stop previous simulation
+  if (_graphSim) { _graphSim.stop(); _graphSim = null; }
 
   const rect = container.getBoundingClientRect();
   const width = rect.width || 800;
-  const height = (rect.height - 40) || 500; // subtract toolbar
+  const height = (rect.height - 34) || 500;
 
-  svg.attr('width', width).attr('height', height);
+  const svg = d3.select(svgEl)
+    .attr('width', width)
+    .attr('height', height)
+    .attr('viewBox', `0 0 ${width} ${height}`);
+
   svg.selectAll('*').remove();
 
-  // Defs for glow filter + arrow markers
-  const defs = svg.append('defs');
+  const nodesData = _graphData.nodes;
+  const edgesData = _graphData.edges;
+  if (nodesData.length === 0) return;
 
-  // Glow filter
-  const glow = defs.append('filter').attr('id', 'glow');
-  glow.append('feGaussianBlur').attr('stdDeviation', '4').attr('result', 'coloredBlur');
-  const merge = glow.append('feMerge');
-  merge.append('feMergeNode').attr('in', 'coloredBlur');
-  merge.append('feMergeNode').attr('in', 'SourceGraphic');
+  // Prep nodes
+  const nodes = nodesData.map(n => ({
+    id: n.id,
+    label: n.label || 'Agent',
+    status: n.status || 'dead',
+    task_type: n.task_type || '',
+    created_at: n.created_at,
+    died_at: n.died_at,
+  }));
 
-  // Pulse glow for alive agents
-  const pulseGlow = defs.append('filter').attr('id', 'pulseGlow');
-  pulseGlow.append('feGaussianBlur').attr('stdDeviation', '6').attr('result', 'blur');
-  const pMerge = pulseGlow.append('feMerge');
-  pMerge.append('feMergeNode').attr('in', 'blur');
-  pMerge.append('feMergeNode').attr('in', 'SourceGraphic');
+  const nodeIds = new Set(nodes.map(n => n.id));
 
-  // Arrow marker
-  defs.append('marker')
-    .attr('id', 'arrowhead')
-    .attr('viewBox', '0 -5 10 10')
-    .attr('refX', 28)
-    .attr('refY', 0)
-    .attr('markerWidth', 8)
-    .attr('markerHeight', 8)
-    .attr('orient', 'auto')
-    .append('path')
-    .attr('d', 'M0,-5L10,0L0,5')
-    .attr('fill', '#555c6b');
+  // Prep edges — compute curvature for multi-edges
+  const edgePairCount = {};
+  const edgePairIndex = {};
+  const edges = [];
 
-  // Artifact arrow (different color)
-  defs.append('marker')
-    .attr('id', 'arrowhead-artifact')
-    .attr('viewBox', '0 -5 10 10')
-    .attr('refX', 28)
-    .attr('refY', 0)
-    .attr('markerWidth', 8)
-    .attr('markerHeight', 8)
-    .attr('orient', 'auto')
-    .append('path')
-    .attr('d', 'M0,-5L10,0L0,5')
-    .attr('fill', '#a78bfa');
+  edgesData.forEach(e => {
+    if (!nodeIds.has(e.source) || !nodeIds.has(e.target)) return;
+    const pairKey = [e.source, e.target].sort().join('|');
+    edgePairCount[pairKey] = (edgePairCount[pairKey] || 0) + 1;
+  });
 
-  if (graphData.nodes.length === 0) {
-    svg.append('text')
-      .attr('x', width / 2)
-      .attr('y', height / 2)
-      .attr('text-anchor', 'middle')
-      .attr('fill', '#555c6b')
-      .attr('font-size', '14px')
-      .text('No agents yet. Launch a project to see the swarm graph.');
-    return;
-  }
+  edgesData.forEach(e => {
+    if (!nodeIds.has(e.source) || !nodeIds.has(e.target)) return;
+    const pairKey = [e.source, e.target].sort().join('|');
+    const total = edgePairCount[pairKey];
+    const idx = edgePairIndex[pairKey] || 0;
+    edgePairIndex[pairKey] = idx + 1;
+
+    const isReversed = e.source > e.target;
+    let curvature = 0;
+    if (total > 1) {
+      const range = Math.min(1.2, 0.6 + total * 0.15);
+      curvature = ((idx / (total - 1)) - 0.5) * range * 2;
+      if (isReversed) curvature = -curvature;
+    }
+
+    edges.push({
+      source: e.source,
+      target: e.target,
+      label: (e.label || '').replace(/_/g, ' '),
+      edgeType: e.type || 'spawned',
+      curvature,
+      pairTotal: total,
+    });
+  });
 
   // Build legend
-  renderGraphLegend();
+  renderGraphLegend(nodes);
 
-  // Main group for zoom/pan
-  graphG = svg.append('g');
+  // Main group
+  _graphG = svg.append('g');
 
-  // Zoom behavior
-  graphZoom = d3.zoom()
+  // Zoom
+  _graphZoom = d3.zoom()
     .scaleExtent([0.1, 4])
-    .on('zoom', (event) => {
-      graphG.attr('transform', event.transform);
-    });
-  svg.call(graphZoom);
+    .on('zoom', (event) => _graphG.attr('transform', event.transform));
+  svg.call(_graphZoom);
 
-  // Pre-process edges for curve distribution
-  const edgePairs = {};
-  graphData.edges.forEach(e => {
-    const key = [e.source, e.target].sort().join('|');
-    edgePairs[key] = (edgePairs[key] || 0) + 1;
-    e._pairIndex = edgePairs[key];
-  });
-  graphData.edges.forEach(e => {
-    const key = [e.source, e.target].sort().join('|');
-    e._pairTotal = edgePairs[key];
-  });
-
-  // Force simulation
-  graphSim = d3.forceSimulation(graphData.nodes)
-    .force('link', d3.forceLink(graphData.edges)
-      .id(d => d.id)
-      .distance(d => {
-        const base = 180;
-        return base + ((d._pairTotal || 1) - 1) * 40;
-      })
-    )
-    .force('charge', d3.forceManyBody().strength(-500))
+  // Force simulation — MiroFish params
+  _graphSim = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(edges).id(d => d.id).distance(d => {
+      const base = 150;
+      return base + ((d.pairTotal || 1) - 1) * 50;
+    }))
+    .force('charge', d3.forceManyBody().strength(-400))
     .force('center', d3.forceCenter(width / 2, height / 2))
-    .force('collide', d3.forceCollide(60))
-    .force('x', d3.forceX(width / 2).strength(0.03))
-    .force('y', d3.forceY(height / 2).strength(0.03));
+    .force('collide', d3.forceCollide(50))
+    .force('x', d3.forceX(width / 2).strength(0.04))
+    .force('y', d3.forceY(height / 2).strength(0.04));
 
-  // Draw edges
-  const linkGroup = graphG.append('g').attr('class', 'graph-links');
+  // ── Draw edges ──────────────────────────────────────────────
 
-  const links = linkGroup.selectAll('path')
-    .data(graphData.edges)
-    .enter()
-    .append('path')
+  const linkGroup = _graphG.append('g').attr('class', 'links');
+
+  function getLinkPath(d) {
+    const sx = d.source.x, sy = d.source.y;
+    const tx = d.target.x, ty = d.target.y;
+    if (d.curvature === 0) return `M${sx},${sy} L${tx},${ty}`;
+    const dx = tx - sx, dy = ty - sy;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    const offsetRatio = 0.25 + (d.pairTotal || 1) * 0.05;
+    const baseOffset = Math.max(35, dist * offsetRatio);
+    const ox = (-dy / dist) * d.curvature * baseOffset;
+    const oy = (dx / dist) * d.curvature * baseOffset;
+    const cx = (sx + tx) / 2 + ox;
+    const cy = (sy + ty) / 2 + oy;
+    return `M${sx},${sy} Q${cx},${cy} ${tx},${ty}`;
+  }
+
+  function getLinkMid(d) {
+    const sx = d.source.x, sy = d.source.y;
+    const tx = d.target.x, ty = d.target.y;
+    if (d.curvature === 0) return { x: (sx + tx) / 2, y: (sy + ty) / 2 };
+    const dx = tx - sx, dy = ty - sy;
+    const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+    const offsetRatio = 0.25 + (d.pairTotal || 1) * 0.05;
+    const baseOffset = Math.max(35, dist * offsetRatio);
+    const ox = (-dy / dist) * d.curvature * baseOffset;
+    const oy = (dx / dist) * d.curvature * baseOffset;
+    const cx = (sx + tx) / 2 + ox;
+    const cy = (sy + ty) / 2 + oy;
+    return { x: 0.25 * sx + 0.5 * cx + 0.25 * tx, y: 0.25 * sy + 0.5 * cy + 0.25 * ty };
+  }
+
+  const link = linkGroup.selectAll('path')
+    .data(edges).enter().append('path')
+    .attr('stroke', d => d.edgeType === 'artifact' ? '#9b59b6' : '#505868')
+    .attr('stroke-width', 1.5)
     .attr('fill', 'none')
-    .attr('stroke', d => d.type === 'artifact' ? '#a78bfa' : '#3a4050')
-    .attr('stroke-width', d => d.type === 'artifact' ? 1.5 : 2)
-    .attr('stroke-dasharray', d => d.type === 'artifact' ? '6,3' : 'none')
-    .attr('marker-end', d => d.type === 'artifact' ? 'url(#arrowhead-artifact)' : 'url(#arrowhead)')
-    .attr('opacity', 0.6)
-    .style('transition', 'opacity 0.3s');
+    .attr('stroke-dasharray', d => d.edgeType === 'artifact' ? '5,3' : 'none')
+    .style('cursor', 'pointer')
+    .on('click', (event, d) => {
+      event.stopPropagation();
+      link.attr('stroke', dd => dd.edgeType === 'artifact' ? '#9b59b6' : '#505868').attr('stroke-width', 1.5);
+      d3.select(event.target).attr('stroke', '#E91E63').attr('stroke-width', 3);
+    });
+
+  // Edge label backgrounds
+  const linkLabelBg = linkGroup.selectAll('rect')
+    .data(edges).enter().append('rect')
+    .attr('fill', 'rgba(18,21,27,0.85)')
+    .attr('rx', 3).attr('ry', 3)
+    .style('pointer-events', 'none')
+    .style('display', _showEdgeLabels ? 'block' : 'none');
+  _linkLabelBgRef = linkLabelBg;
 
   // Edge labels
-  const edgeLabels = linkGroup.selectAll('text')
-    .data(graphData.edges)
-    .enter()
-    .append('text')
-    .attr('text-anchor', 'middle')
+  const linkLabels = linkGroup.selectAll('text')
+    .data(edges).enter().append('text')
+    .text(d => d.label)
     .attr('font-size', '9px')
     .attr('fill', '#8b919e')
-    .attr('font-family', "'JetBrains Mono', monospace")
-    .attr('dy', -6)
-    .text(d => d.label.replace(/_/g, ' '))
-    .attr('opacity', showEdgeLabels ? 0.8 : 0);
+    .attr('text-anchor', 'middle')
+    .attr('dominant-baseline', 'middle')
+    .style('pointer-events', 'none')
+    .style('font-family', "'JetBrains Mono', monospace")
+    .style('display', _showEdgeLabels ? 'block' : 'none');
+  _linkLabelsRef = linkLabels;
 
-  // Draw nodes
-  const nodeGroup = graphG.append('g').attr('class', 'graph-nodes');
+  // ── Draw nodes ──────────────────────────────────────────────
 
-  const nodeGs = nodeGroup.selectAll('g')
-    .data(graphData.nodes)
-    .enter()
-    .append('g')
-    .attr('class', 'graph-node')
+  const nodeGroup = _graphG.append('g').attr('class', 'nodes');
+
+  // MiroFish style: simple circles, white stroke, color fill
+  const node = nodeGroup.selectAll('circle')
+    .data(nodes).enter().append('circle')
+    .attr('r', 10)
+    .attr('fill', d => getPersonaColor(d.label))
+    .attr('stroke', d => (d.status === 'alive' || d.status === 'working') ? '#fff' : '#2a2f3a')
+    .attr('stroke-width', 2.5)
+    .attr('opacity', d => d.status === 'dead' ? 0.5 : 1)
     .style('cursor', 'pointer')
     .call(d3.drag()
-      .on('start', dragStart)
-      .on('drag', dragging)
-      .on('end', dragEnd)
+      .on('start', (event, d) => {
+        d.fx = d.x; d.fy = d.y;
+        d._dragStartX = event.x; d._dragStartY = event.y; d._isDragging = false;
+      })
+      .on('drag', (event, d) => {
+        const dx = event.x - d._dragStartX, dy = event.y - d._dragStartY;
+        if (!d._isDragging && Math.sqrt(dx * dx + dy * dy) > 3) {
+          d._isDragging = true;
+          _graphSim.alphaTarget(0.3).restart();
+        }
+        if (d._isDragging) { d.fx = event.x; d.fy = event.y; }
+      })
+      .on('end', (event, d) => {
+        if (d._isDragging) _graphSim.alphaTarget(0);
+        d.fx = null; d.fy = null; d._isDragging = false;
+      })
     )
     .on('click', (event, d) => {
       event.stopPropagation();
-      selectGraphNode(d, links, nodeGs);
+      // Reset
+      node.attr('stroke', dd => (dd.status === 'alive' || dd.status === 'working') ? '#fff' : '#2a2f3a').attr('stroke-width', 2.5);
+      link.attr('stroke', dd => dd.edgeType === 'artifact' ? '#9b59b6' : '#505868').attr('stroke-width', 1.5);
+      // Highlight selected
+      d3.select(event.target).attr('stroke', '#E91E63').attr('stroke-width', 4);
+      // Highlight connected edges
+      link.filter(l => l.source.id === d.id || l.target.id === d.id)
+        .attr('stroke', '#E91E63').attr('stroke-width', 2.5);
+      showGraphDetail(d);
+    })
+    .on('mouseenter', (event, d) => {
+      d3.select(event.target).attr('stroke-width', 3.5);
+    })
+    .on('mouseleave', (event, d) => {
+      const sel = d3.select(event.target);
+      if (sel.attr('stroke') !== '#E91E63') sel.attr('stroke-width', 2.5);
     });
 
-  // Outer glow ring for alive/working agents
-  nodeGs.append('circle')
-    .attr('r', 24)
-    .attr('fill', 'none')
-    .attr('stroke', d => STATUS_GLOW[d.status] || 'transparent')
-    .attr('stroke-width', d => (d.status === 'alive' || d.status === 'working') ? 2 : 0)
-    .attr('opacity', 0.4)
-    .attr('class', 'node-glow');
-
-  // Main node circle
-  nodeGs.append('circle')
-    .attr('r', 18)
-    .attr('fill', d => getAgentColor(d.label))
-    .attr('stroke', '#1a1e27')
-    .attr('stroke-width', 2.5)
-    .attr('filter', d => (d.status === 'alive' || d.status === 'working') ? 'url(#glow)' : 'none')
-    .attr('opacity', d => d.status === 'dead' ? 0.4 : 1);
-
-  // Status indicator dot
-  nodeGs.append('circle')
-    .attr('r', 4)
-    .attr('cx', 13)
-    .attr('cy', -13)
-    .attr('fill', d => STATUS_GLOW[d.status] || '#555c6b')
-    .attr('stroke', '#0c0e12')
-    .attr('stroke-width', 1.5);
-
-  // Node label
-  nodeGs.append('text')
-    .attr('text-anchor', 'middle')
-    .attr('dy', 32)
+  // Node labels (beside the node, not centered)
+  const nodeLabels = nodeGroup.selectAll('text')
+    .data(nodes).enter().append('text')
+    .text(d => {
+      const l = d.label || 'Agent';
+      return l.length > 14 ? l.substring(0, 12) + '...' : l;
+    })
     .attr('font-size', '10px')
-    .attr('font-weight', '600')
-    .attr('fill', '#e2e5ea')
-    .attr('font-family', "'Inter', sans-serif")
-    .text(d => {
-      const label = d.label || 'Agent';
-      return label.length > 16 ? label.slice(0, 14) + '..' : label;
+    .attr('fill', '#c8ccd4')
+    .attr('font-weight', '500')
+    .attr('dx', 14)
+    .attr('dy', 4)
+    .style('pointer-events', 'none')
+    .style('font-family', "'Inter', sans-serif");
+
+  // ── Tick ────────────────────────────────────────────────────
+
+  _graphSim.on('tick', () => {
+    link.attr('d', d => getLinkPath(d));
+
+    linkLabels.each(function(d) {
+      const mid = getLinkMid(d);
+      d3.select(this).attr('x', mid.x).attr('y', mid.y);
     });
 
-  // Persona initial inside node
-  nodeGs.append('text')
-    .attr('text-anchor', 'middle')
-    .attr('dy', 5)
-    .attr('font-size', '13px')
-    .attr('font-weight', '700')
-    .attr('fill', '#fff')
-    .attr('font-family', "'Inter', sans-serif")
-    .text(d => {
-      const parts = (d.label || 'A').split(' ');
-      return parts.map(p => p[0]).join('').slice(0, 2);
+    linkLabelBg.each(function(d, i) {
+      const mid = getLinkMid(d);
+      const textEl = linkLabels.nodes()[i];
+      if (!textEl) return;
+      try {
+        const bbox = textEl.getBBox();
+        d3.select(this)
+          .attr('x', mid.x - bbox.width / 2 - 3)
+          .attr('y', mid.y - bbox.height / 2 - 1)
+          .attr('width', bbox.width + 6)
+          .attr('height', bbox.height + 2);
+      } catch(e) {}
     });
 
-  // Spawn animation: nodes appear with scale-up
-  nodeGs.attr('transform', d => `translate(${width / 2},${height / 2}) scale(0)`)
-    .transition()
-    .duration(600)
-    .delay((d, i) => i * 80)
-    .ease(d3.easeBackOut.overshoot(1.5))
-    .attr('transform', d => `translate(${d.x || width / 2},${d.y || height / 2}) scale(1)`);
-
-  // Links fade in
-  links.attr('opacity', 0)
-    .transition()
-    .duration(400)
-    .delay((d, i) => 300 + i * 50)
-    .attr('opacity', 0.6);
-
-  // Pulse animation for alive nodes
-  function pulseAlive() {
-    nodeGs.selectAll('.node-glow')
-      .filter(d => d.status === 'alive' || d.status === 'working')
-      .transition()
-      .duration(1200)
-      .attr('r', 28)
-      .attr('opacity', 0.15)
-      .transition()
-      .duration(1200)
-      .attr('r', 24)
-      .attr('opacity', 0.4)
-      .on('end', function() {
-        // Only continue if element still exists
-        if (this.parentNode) pulseAlive();
-      });
-  }
-  pulseAlive();
-
-  // Tick function
-  graphSim.on('tick', () => {
-    // Update node positions
-    nodeGs.attr('transform', d => `translate(${d.x},${d.y})`);
-
-    // Update link paths with curves for multiple edges
-    links.attr('d', d => {
-      const dx = d.target.x - d.source.x;
-      const dy = d.target.y - d.source.y;
-      if (d._pairTotal <= 1) {
-        return `M${d.source.x},${d.source.y}L${d.target.x},${d.target.y}`;
-      }
-      const curvature = ((d._pairIndex - 1) - (d._pairTotal - 1) / 2) * 50;
-      const mx = (d.source.x + d.target.x) / 2 + (-dy / Math.sqrt(dx * dx + dy * dy + 1)) * curvature;
-      const my = (d.source.y + d.target.y) / 2 + (dx / Math.sqrt(dx * dx + dy * dy + 1)) * curvature;
-      return `M${d.source.x},${d.source.y}Q${mx},${my} ${d.target.x},${d.target.y}`;
-    });
-
-    // Update edge label positions
-    edgeLabels
-      .attr('x', d => (d.source.x + d.target.x) / 2)
-      .attr('y', d => (d.source.y + d.target.y) / 2);
+    node.attr('cx', d => d.x).attr('cy', d => d.y);
+    nodeLabels.attr('x', d => d.x).attr('y', d => d.y);
   });
 
   // Click background to deselect
   svg.on('click', () => {
-    deselectGraphNode(links, nodeGs);
+    node.attr('stroke', d => (d.status === 'alive' || d.status === 'working') ? '#fff' : '#2a2f3a').attr('stroke-width', 2.5);
+    link.attr('stroke', d => d.edgeType === 'artifact' ? '#9b59b6' : '#505868').attr('stroke-width', 1.5);
+    hideGraphDetail();
   });
 }
 
-function selectGraphNode(d, links, nodeGs) {
-  selectedGraphNode = d;
-
-  // Dim everything
-  nodeGs.selectAll('circle').transition().duration(200).attr('opacity', 0.15);
-  nodeGs.selectAll('text').transition().duration(200).attr('opacity', 0.15);
-  links.transition().duration(200).attr('opacity', 0.05);
-
-  // Highlight selected + connected
-  const connected = new Set();
-  connected.add(d.id);
-  graphData.edges.forEach(e => {
-    const sid = typeof e.source === 'object' ? e.source.id : e.source;
-    const tid = typeof e.target === 'object' ? e.target.id : e.target;
-    if (sid === d.id) connected.add(tid);
-    if (tid === d.id) connected.add(sid);
-  });
-
-  nodeGs.filter(n => connected.has(n.id))
-    .selectAll('circle').transition().duration(200).attr('opacity', 1);
-  nodeGs.filter(n => connected.has(n.id))
-    .selectAll('text').transition().duration(200).attr('opacity', 1);
-
-  links.filter(e => {
-    const sid = typeof e.source === 'object' ? e.source.id : e.source;
-    const tid = typeof e.target === 'object' ? e.target.id : e.target;
-    return sid === d.id || tid === d.id;
-  }).transition().duration(200)
-    .attr('opacity', 0.9)
-    .attr('stroke-width', 3);
-
-  // Show detail panel
-  showGraphDetail(d);
-}
-
-function deselectGraphNode(links, nodeGs) {
-  selectedGraphNode = null;
-  nodeGs.selectAll('circle').transition().duration(200)
-    .attr('opacity', d => d.status === 'dead' ? 0.4 : 1);
-  nodeGs.selectAll('text').transition().duration(200).attr('opacity', 1);
-  links.transition().duration(200)
-    .attr('opacity', 0.6)
-    .attr('stroke-width', d => d.type === 'artifact' ? 1.5 : 2);
-  hideGraphDetail();
-}
+// ── Graph Detail Panel ────────────────────────────────────────
 
 function showGraphDetail(d) {
   const panel = document.getElementById('graphDetailPanel');
@@ -945,26 +982,30 @@ function showGraphDetail(d) {
   if (!panel) return;
 
   title.textContent = d.label || 'Agent';
+
+  const statusClass = (d.status === 'alive' || d.status === 'working') ? 'gd-status-alive' : d.status === 'waiting' ? 'gd-status-waiting' : 'gd-status-dead';
+  const born = d.created_at && d.created_at !== 'None' ? new Date(d.created_at).toLocaleTimeString() : '--';
+  const died = d.died_at && d.died_at !== 'None' && d.died_at !== 'null' && d.died_at !== '' ? new Date(d.died_at).toLocaleTimeString() : null;
+
+  const connEdges = _graphData.edges.filter(e => e.source === d.id || e.target === d.id);
+  const connHtml = connEdges.length > 0
+    ? connEdges.map(e => {
+        const other = e.source === d.id ? e.target : e.source;
+        const otherNode = _graphData.nodes.find(n => n.id === other);
+        const dir = e.source === d.id ? '&rarr;' : '&larr;';
+        return `<div class="gd-conn">${dir} ${otherNode ? escapeHtml(otherNode.label) : other.slice(0, 8)} <span class="gd-conn-type">${escapeHtml((e.label || '').replace(/_/g, ' '))}</span></div>`;
+      }).join('')
+    : '<div class="gd-conn" style="color:var(--text-muted)">No connections yet</div>';
+
   body.innerHTML = `
-    <div class="gd-row"><span class="gd-key">ID</span><span class="gd-val">${d.id}</span></div>
-    <div class="gd-row"><span class="gd-key">Status</span><span class="gd-val gd-status-${d.status}">${(d.status || '').toUpperCase()}</span></div>
-    <div class="gd-row"><span class="gd-key">Task</span><span class="gd-val">${d.task_type || '—'}</span></div>
-    <div class="gd-row"><span class="gd-key">Born</span><span class="gd-val">${d.created_at ? new Date(d.created_at).toLocaleTimeString() : '—'}</span></div>
-    ${d.died_at && d.died_at !== 'None' && d.died_at !== 'null' ? `<div class="gd-row"><span class="gd-key">Died</span><span class="gd-val">${new Date(d.died_at).toLocaleTimeString()}</span></div>` : ''}
+    <div class="gd-row"><span class="gd-key">Status</span><span class="gd-val ${statusClass}">${(d.status || '').toUpperCase()}</span></div>
+    <div class="gd-row"><span class="gd-key">Task</span><span class="gd-val">${escapeHtml(d.task_type || '--')}</span></div>
+    <div class="gd-row"><span class="gd-key">Spawned</span><span class="gd-val">${born}</span></div>
+    ${died ? `<div class="gd-row"><span class="gd-key">Retired</span><span class="gd-val">${died}</span></div>` : ''}
+    <div class="gd-row"><span class="gd-key">ID</span><span class="gd-val">${d.id.slice(0, 12)}...</span></div>
     <div class="gd-connections">
       <span class="gd-key">Connections</span>
-      ${graphData.edges.filter(e => {
-        const sid = typeof e.source === 'object' ? e.source.id : e.source;
-        const tid = typeof e.target === 'object' ? e.target.id : e.target;
-        return sid === d.id || tid === d.id;
-      }).map(e => {
-        const sid = typeof e.source === 'object' ? e.source.id : e.source;
-        const tid = typeof e.target === 'object' ? e.target.id : e.target;
-        const other = sid === d.id ? tid : sid;
-        const otherNode = graphData.nodes.find(n => n.id === other);
-        const dir = sid === d.id ? '→' : '←';
-        return `<div class="gd-conn">${dir} ${otherNode ? otherNode.label : other.slice(0, 8)} <span class="gd-conn-type">${e.label}</span></div>`;
-      }).join('') || '<div class="gd-conn">No connections</div>'}
+      ${connHtml}
     </div>
   `;
   panel.classList.remove('hidden');
@@ -975,92 +1016,78 @@ function hideGraphDetail() {
   if (panel) panel.classList.add('hidden');
 }
 
-function renderGraphLegend() {
+function renderGraphLegend(nodes) {
   const legend = document.getElementById('graphLegend');
   if (!legend) return;
-
-  // Collect unique persona types from current data
   const types = {};
-  graphData.nodes.forEach(n => {
+  (nodes || _graphData.nodes).forEach(n => {
     if (!types[n.label]) types[n.label] = 0;
     types[n.label]++;
   });
-
   legend.innerHTML = Object.entries(types).map(([label, count]) =>
     `<div class="legend-item">
-      <span class="legend-dot" style="background:${getAgentColor(label)}"></span>
-      <span class="legend-label">${label}</span>
+      <span class="legend-dot" style="background:${getPersonaColor(label)}"></span>
+      <span class="legend-label">${escapeHtml(label)}</span>
       <span class="legend-count">${count}</span>
     </div>`
   ).join('');
 }
 
-// Drag handlers
-function dragStart(event, d) {
-  if (!event.active) graphSim.alphaTarget(0.3).restart();
-  d.fx = d.x;
-  d.fy = d.y;
-}
+// ── Graph controls ────────────────────────────────────────────
 
-function dragging(event, d) {
-  d.fx = event.x;
-  d.fy = event.y;
-}
-
-function dragEnd(event, d) {
-  if (!event.active) graphSim.alphaTarget(0);
-  d.fx = null;
-  d.fy = null;
-}
-
-// Graph controls
 document.getElementById('btnGraphReset')?.addEventListener('click', () => {
-  const svg = d3.select('#graphSvg');
-  svg.transition().duration(500).call(graphZoom.transform, d3.zoomIdentity);
+  if (_graphZoom) {
+    d3.select('#graphSvg').transition().duration(400).call(_graphZoom.transform, d3.zoomIdentity);
+  }
 });
 
 document.getElementById('chkEdgeLabels')?.addEventListener('change', (e) => {
-  showEdgeLabels = e.target.checked;
-  d3.selectAll('.graph-links text')
-    .transition().duration(200)
-    .attr('opacity', showEdgeLabels ? 0.8 : 0);
+  _showEdgeLabels = e.target.checked;
+  if (_linkLabelsRef) _linkLabelsRef.style('display', _showEdgeLabels ? 'block' : 'none');
+  if (_linkLabelBgRef) _linkLabelBgRef.style('display', _showEdgeLabels ? 'block' : 'none');
 });
 
 document.getElementById('btnCloseGraphDetail')?.addEventListener('click', () => {
   hideGraphDetail();
 });
 
-// Auto-refresh graph when switching to graph tab or on new events
-const origTabClick = function(tab) {
-  if (tab.dataset.tab === 'graph' && state.activeProjectId) {
-    setTimeout(loadGraph, 100);
-  }
-};
+// ── Auto-load graph on tab switch + project select ────────────
 
-// Hook into tab switching
+// Load graph whenever Graph tab is activated
 $$('.tab').forEach(tab => {
-  tab.addEventListener('click', () => origTabClick(tab));
+  tab.addEventListener('click', () => {
+    if (tab.dataset.tab === 'graph' && state.activeProjectId) {
+      setTimeout(loadGraph, 50);
+    }
+  });
 });
 
-// Refresh graph on swarm events
-const origHandleSwarmEvent = handleSwarmEvent;
+// Also load graph on project select (override selectProject)
+const _origSelectProject = selectProject;
+selectProject = function(projectId) {
+  _origSelectProject(projectId);
+  // Pre-load graph data in background
+  setTimeout(loadGraph, 500);
+};
+
+// Refresh graph on swarm events (debounced)
+const _origHandleSwarmEvent = handleSwarmEvent;
 handleSwarmEvent = function(event) {
-  origHandleSwarmEvent(event);
-  // Auto-refresh graph on relevant events
+  _origHandleSwarmEvent(event);
   if (['agent_spawned', 'agent_died', 'task_completed', 'artifact_created'].includes(event.type)) {
-    const graphTab = document.querySelector('.tab[data-tab="graph"]');
-    if (graphTab && graphTab.classList.contains('active')) {
-      clearTimeout(window._graphRefreshTimer);
-      window._graphRefreshTimer = setTimeout(loadGraph, 2500);
-    }
+    clearTimeout(window._graphRefreshTimer);
+    window._graphRefreshTimer = setTimeout(() => {
+      const graphTab = document.querySelector('.tab[data-tab="graph"]');
+      if (graphTab && graphTab.classList.contains('active')) loadGraph();
+    }, 2000);
   }
 };
 
-// Handle window resize
+// Resize handler
 window.addEventListener('resize', () => {
-  const graphTab = document.querySelector('.tab[data-tab="graph"]');
-  if (graphTab && graphTab.classList.contains('active')) {
-    clearTimeout(window._graphResizeTimer);
-    window._graphResizeTimer = setTimeout(renderGraph, 300);
-  }
+  clearTimeout(window._graphResizeTimer);
+  window._graphResizeTimer = setTimeout(() => {
+    const graphTab = document.querySelector('.tab[data-tab="graph"]');
+    if (graphTab && graphTab.classList.contains('active') && _graphData.nodes.length > 0) renderGraph();
+  }, 300);
 });

@@ -816,16 +816,17 @@ html, body {
   animation: pulse 2s ease-in-out infinite;
 }
 
-/* ── SWARM GRAPH VISUALIZATION ────────────────────────────── */
+/* ── SWARM GRAPH — MiroFish-style ─────────────────────────── */
 .graph-container {
   flex: 1;
   display: flex;
   flex-direction: column;
   position: relative;
   overflow: hidden;
-  background:
-    radial-gradient(circle at 50% 50%, rgba(79, 143, 247, 0.03) 0%, transparent 70%),
-    var(--bg-base);
+  /* Dot grid background — industrial schematic feel */
+  background-color: var(--bg-base);
+  background-image: radial-gradient(#2a2f3a 1px, transparent 1px);
+  background-size: 20px 20px;
 }
 
 .graph-toolbar {
@@ -843,7 +844,7 @@ html, body {
 .graph-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 10px;
   align-items: center;
 }
 
@@ -862,9 +863,7 @@ html, body {
   flex-shrink: 0;
 }
 
-.legend-label {
-  white-space: nowrap;
-}
+.legend-label { white-space: nowrap; }
 
 .legend-count {
   font-family: var(--font-mono);
@@ -902,30 +901,65 @@ html, body {
   width: 100%;
 }
 
-/* Graph detail slide-in panel */
+/* ── Graph overlay states (loading / empty / error) ────────── */
+.graph-state-overlay {
+  position: absolute;
+  inset: 34px 0 0 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 4;
+  gap: 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  text-align: center;
+  line-height: 1.6;
+  background: rgba(12, 14, 18, 0.6);
+  backdrop-filter: blur(2px);
+}
+
+.graph-spinner {
+  width: 28px;
+  height: 28px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.graph-empty-icon {
+  font-size: 28px;
+  color: var(--text-muted);
+  opacity: 0.5;
+}
+
+/* ── Graph detail slide-in ─────────────────────────────────── */
 .graph-detail-panel {
   position: absolute;
   right: 0;
   top: 34px;
   bottom: 0;
-  width: 260px;
+  width: 240px;
   background: var(--bg-surface);
   border-left: 1px solid var(--border);
   z-index: 10;
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  animation: slideIn 0.2s ease;
+  animation: slideIn 0.15s ease;
 }
 
 @keyframes slideIn {
-  from { transform: translateX(100%); opacity: 0; }
-  to { transform: translateX(0); opacity: 1; }
+  from { transform: translateX(100%); }
+  to { transform: translateX(0); }
 }
 
-.graph-detail-panel.hidden {
-  display: none;
-}
+.graph-detail-panel.hidden { display: none; }
 
 .graph-detail-header {
   display: flex;
@@ -966,7 +1000,7 @@ html, body {
   font-size: 11px;
   color: var(--text-secondary);
   text-align: right;
-  max-width: 160px;
+  max-width: 150px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -976,15 +1010,8 @@ html, body {
 .gd-status-dead { color: var(--text-muted); }
 .gd-status-waiting { color: var(--orange); }
 
-.gd-connections {
-  margin-top: 8px;
-  padding-top: 6px;
-}
-
-.gd-connections .gd-key {
-  display: block;
-  margin-bottom: 6px;
-}
+.gd-connections { margin-top: 8px; padding-top: 6px; }
+.gd-connections .gd-key { display: block; margin-bottom: 6px; }
 
 .gd-conn {
   font-size: 11px;
@@ -1003,20 +1030,47 @@ html, body {
   margin-left: 4px;
 }
 
-/* Graph node hover effects via CSS */
-.graph-node:hover circle {
-  filter: url(#glow) brightness(1.2);
+/* ── TOAST NOTIFICATIONS ─────────────────────────────────── */
+.toast-container {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  pointer-events: none;
 }
 
-/* Animated flowing dots on edges for alive connections */
-@keyframes flowDot {
-  0% { stroke-dashoffset: 20; }
-  100% { stroke-dashoffset: 0; }
+.toast {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--bg-raised);
+  color: var(--text-secondary);
+  pointer-events: auto;
+  opacity: 0;
+  transform: translateY(8px);
+  transition: opacity 0.2s, transform 0.2s;
 }
 
-.graph-links path[data-status="active"] {
-  animation: flowDot 1s linear infinite;
+.toast-visible {
+  opacity: 1;
+  transform: translateY(0);
 }
+
+.toast-icon { font-size: 13px; flex-shrink: 0; }
+.toast-ok { border-color: var(--green-dim); }
+.toast-ok .toast-icon { color: var(--green); }
+.toast-error { border-color: var(--red-dim); }
+.toast-error .toast-icon { color: var(--red); }
+.toast-warn { border-color: var(--amber-dim); }
+.toast-warn .toast-icon { color: var(--amber); }
 
 /* ── RESPONSIVE ───────────────────────────────────────────── */
 @media (max-width: 1200px) {

@@ -142,6 +142,12 @@ class TaskQueue:
                 redis=self.redis,
             )
 
+            # Link the agent to the task so the graph can draw edges
+            await self.db.update_task(
+                task.id,
+                assigned_agent_id=agent.identity.id,
+            )
+
             await self.redis.publish_event({
                 "type": "agent_spawned",
                 "agent_id": agent.identity.id,

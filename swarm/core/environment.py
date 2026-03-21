@@ -14,7 +14,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from swarm.models.artifact import Artifact, ArtifactType
-from swarm.models.task import Task, TaskPriority, TaskType
+from swarm.models.task import Task, TaskPriority, TaskStatus, TaskType
 
 if TYPE_CHECKING:
     from swarm.db.postgres import PostgresDB
