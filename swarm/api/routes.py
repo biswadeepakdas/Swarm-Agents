@@ -114,6 +114,14 @@ async def delete_project(project_id: str):
     return {"message": f"Project '{project.get('name', '')}' deleted.", "id": project_id}
 
 
+@router.post("/admin/cleanup")
+async def admin_cleanup():
+    """Force cleanup of zombie agents and tasks. Call this after a redeploy."""
+    result = await _db.cleanup_stale_on_startup()
+    logger.warning(f"Manual cleanup: {result}")
+    return {"cleaned": result}
+
+
 @router.get("/projects/{project_id}")
 async def get_project(project_id: str):
     """Get project status with summary."""
