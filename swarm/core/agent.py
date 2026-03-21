@@ -396,7 +396,11 @@ class SwarmAgent:
         """Build an Artifact from a submit_artifact tool call."""
         output_type = TASK_OUTPUT_MAP.get(self.task.type, ArtifactType.DOCUMENTATION)
 
-        tags = list(submission.get("tags", []))
+        raw_tags = submission.get("tags", [])
+        # Handle LLMs that pass tags as a string instead of array
+        if isinstance(raw_tags, str):
+            raw_tags = [t.strip().strip('"').strip("'") for t in raw_tags.split(",") if t.strip()]
+        tags = list(raw_tags)
         tags.append(self.task.type.value)
         if self.task.payload.get("component"):
             tags.append(self.task.payload["component"].lower().replace(" ", "_"))
