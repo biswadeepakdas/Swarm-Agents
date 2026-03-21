@@ -33,7 +33,7 @@ class ModelConfig:
 # Only models with valid API keys will be used.
 
 MODELS: dict[str, ModelConfig] = {
-    # Anthropic
+    # ── Anthropic ─────────────────────────────────────────────────
     "claude-sonnet": ModelConfig(
         model="claude-sonnet-4-20250514",
         api_key_env="ANTHROPIC_API_KEY",
@@ -47,7 +47,7 @@ MODELS: dict[str, ModelConfig] = {
         temperature=0.5,
     ),
 
-    # OpenAI
+    # ── OpenAI ────────────────────────────────────────────────────
     "gpt-4o": ModelConfig(
         model="gpt-4o",
         api_key_env="OPENAI_API_KEY",
@@ -61,7 +61,7 @@ MODELS: dict[str, ModelConfig] = {
         temperature=0.5,
     ),
 
-    # DeepSeek
+    # ── DeepSeek (direct API) ─────────────────────────────────────
     "deepseek-coder": ModelConfig(
         model="deepseek/deepseek-coder",
         api_key_env="DEEPSEEK_API_KEY",
@@ -69,7 +69,56 @@ MODELS: dict[str, ModelConfig] = {
         temperature=0.3,
     ),
 
-    # NVIDIA NIM (OpenAI-compatible)
+    # ── Google ────────────────────────────────────────────────────
+    "gemini-pro": ModelConfig(
+        model="gemini/gemini-1.5-pro",
+        api_key_env="GEMINI_API_KEY",
+        max_tokens=8000,
+        temperature=0.7,
+    ),
+
+    # ── NVIDIA NIM (all free, OpenAI-compatible) ──────────────────
+    # Best for: agentic reasoning, coding, planning, tool calling (1M context!)
+    "nvidia-nemotron-super": ModelConfig(
+        model="nvidia/nemotron-3-super-120b-a12b",
+        api_key_env="NVIDIA_API_KEY",
+        api_base="https://integrate.api.nvidia.com/v1",
+        max_tokens=8000,
+        temperature=0.6,
+    ),
+    # Best for: code generation, reasoning, tool use (Mistral MoE)
+    "nvidia-devstral": ModelConfig(
+        model="mistralai/devstral-2-123b-instruct-2512",
+        api_key_env="NVIDIA_API_KEY",
+        api_base="https://integrate.api.nvidia.com/v1",
+        max_tokens=8000,
+        temperature=0.4,
+    ),
+    # Best for: reasoning, analysis (DeepSeek V3.2)
+    "nvidia-deepseek-v3": ModelConfig(
+        model="deepseek-ai/deepseek-v3.2",
+        api_key_env="NVIDIA_API_KEY",
+        api_base="https://integrate.api.nvidia.com/v1",
+        max_tokens=8000,
+        temperature=0.5,
+    ),
+    # Best for: fast reasoning, chain-of-thought (Magistral)
+    "nvidia-magistral": ModelConfig(
+        model="mistralai/magistral-small-2506",
+        api_key_env="NVIDIA_API_KEY",
+        api_base="https://integrate.api.nvidia.com/v1",
+        max_tokens=8000,
+        temperature=0.5,
+    ),
+    # Best for: large context, general purpose (Llama 3.1 405B)
+    "nvidia-llama-405b": ModelConfig(
+        model="meta/llama-3.1-405b-instruct",
+        api_key_env="NVIDIA_API_KEY",
+        api_base="https://integrate.api.nvidia.com/v1",
+        max_tokens=8000,
+        temperature=0.7,
+    ),
+    # Best for: fast general tasks (Llama 3.3 70B) — proven reliable
     "nvidia-llama": ModelConfig(
         model="meta/llama-3.3-70b-instruct",
         api_key_env="NVIDIA_API_KEY",
@@ -77,13 +126,22 @@ MODELS: dict[str, ModelConfig] = {
         max_tokens=8000,
         temperature=0.7,
     ),
-
-    # Google
-    "gemini-pro": ModelConfig(
-        model="gemini/gemini-1.5-pro",
-        api_key_env="GEMINI_API_KEY",
-        max_tokens=8000,
-        temperature=0.7,
+    # Best for: lightweight fast tasks (Llama 3.2 3B)
+    "nvidia-llama-3b": ModelConfig(
+        model="meta/llama-3.2-3b-instruct",
+        api_key_env="NVIDIA_API_KEY",
+        api_base="https://integrate.api.nvidia.com/v1",
+        max_tokens=4000,
+        temperature=0.5,
+    ),
+    # Best for: reasoning with chain-of-thought (Phi-4 mini flash)
+    # NOTE: returns <think> tags in content — handled in agent.py
+    "nvidia-phi4-reasoning": ModelConfig(
+        model="microsoft/phi-4-mini-flash-reasoning",
+        api_key_env="NVIDIA_API_KEY",
+        api_base="https://integrate.api.nvidia.com/v1",
+        max_tokens=4000,
+        temperature=0.4,
     ),
 }
 
@@ -93,33 +151,87 @@ MODELS: dict[str, ModelConfig] = {
 # If no configured model is available, falls back to config.llm_model.
 
 TASK_ROUTING: dict[TaskType, list[str]] = {
-    # Architecture & planning — needs strong reasoning
-    TaskType.ANALYZE_REQUIREMENTS: ["claude-sonnet", "gpt-4o", "nvidia-llama"],
-    TaskType.PLAN_ARCHITECTURE: ["claude-sonnet", "gpt-4o", "nvidia-llama"],
-    TaskType.RESEARCH: ["gpt-4o", "gemini-pro", "claude-sonnet", "nvidia-llama"],
+    # ── Architecture & planning — needs strong reasoning ──────────
+    # DeepSeek V3.2: excellent analytical reasoning
+    # Llama 405B: largest open model, great for complex planning
+    TaskType.ANALYZE_REQUIREMENTS: [
+        "claude-sonnet", "gpt-4o",
+        "nvidia-deepseek-v3", "nvidia-llama-405b", "nvidia-devstral", "nvidia-llama",
+    ],
+    TaskType.PLAN_ARCHITECTURE: [
+        "claude-sonnet", "gpt-4o",
+        "nvidia-deepseek-v3", "nvidia-llama-405b", "nvidia-devstral", "nvidia-llama",
+    ],
+    TaskType.RESEARCH: [
+        "gpt-4o", "gemini-pro", "claude-sonnet",
+        "nvidia-deepseek-v3", "nvidia-llama-405b", "nvidia-llama",
+    ],
 
-    # Code generation — needs strong code output
-    TaskType.WRITE_CODE: ["claude-sonnet", "deepseek-coder", "gpt-4o", "nvidia-llama"],
-    TaskType.CREATE_API: ["claude-sonnet", "deepseek-coder", "gpt-4o", "nvidia-llama"],
-    TaskType.FIX_CODE: ["claude-sonnet", "deepseek-coder", "gpt-4o", "nvidia-llama"],
-    TaskType.BUILD_FRONTEND_COMPONENT: ["claude-sonnet", "gpt-4o", "nvidia-llama"],
+    # ── Code generation — needs strong code output ────────────────
+    # Devstral: Mistral's dedicated code model (123B MoE) — best for code
+    # DeepSeek V3.2: excellent at code generation
+    TaskType.WRITE_CODE: [
+        "claude-sonnet", "deepseek-coder", "gpt-4o",
+        "nvidia-devstral", "nvidia-deepseek-v3", "nvidia-llama",
+    ],
+    TaskType.CREATE_API: [
+        "claude-sonnet", "deepseek-coder", "gpt-4o",
+        "nvidia-devstral", "nvidia-deepseek-v3", "nvidia-llama",
+    ],
+    TaskType.FIX_CODE: [
+        "claude-sonnet", "deepseek-coder", "gpt-4o",
+        "nvidia-devstral", "nvidia-deepseek-v3", "nvidia-llama",
+    ],
+    TaskType.BUILD_FRONTEND_COMPONENT: [
+        "claude-sonnet", "gpt-4o",
+        "nvidia-devstral", "nvidia-deepseek-v3", "nvidia-llama",
+    ],
 
-    # Design — creative tasks
-    TaskType.DESIGN_UI: ["claude-sonnet", "gpt-4o", "nvidia-llama"],
-    TaskType.DESIGN_DATABASE: ["claude-sonnet", "gpt-4o", "deepseek-coder", "nvidia-llama"],
+    # ── Design — creative + analytical ────────────────────────────
+    TaskType.DESIGN_UI: [
+        "claude-sonnet", "gpt-4o",
+        "nvidia-llama-405b", "nvidia-deepseek-v3", "nvidia-llama",
+    ],
+    TaskType.DESIGN_DATABASE: [
+        "claude-sonnet", "gpt-4o", "deepseek-coder",
+        "nvidia-devstral", "nvidia-deepseek-v3", "nvidia-llama",
+    ],
 
-    # Review — analytical tasks
-    TaskType.REVIEW_CODE: ["claude-sonnet", "gpt-4o", "nvidia-llama"],
-    TaskType.DEBUG: ["claude-sonnet", "deepseek-coder", "gpt-4o", "nvidia-llama"],
+    # ── Review — analytical + reasoning ───────────────────────────
+    # DeepSeek V3.2: strong analytical capability
+    # Phi-4 reasoning: chain-of-thought reasoning (returns <think> tags)
+    TaskType.REVIEW_CODE: [
+        "claude-sonnet", "gpt-4o",
+        "nvidia-deepseek-v3", "nvidia-llama-405b", "nvidia-llama",
+    ],
+    TaskType.DEBUG: [
+        "claude-sonnet", "deepseek-coder", "gpt-4o",
+        "nvidia-devstral", "nvidia-deepseek-v3", "nvidia-llama",
+    ],
 
-    # Testing
-    TaskType.WRITE_TESTS: ["claude-sonnet", "deepseek-coder", "gpt-4o", "nvidia-llama"],
-    TaskType.INTEGRATION_TEST: ["claude-sonnet", "gpt-4o", "nvidia-llama"],
+    # ── Testing — code generation + analysis ──────────────────────
+    TaskType.WRITE_TESTS: [
+        "claude-sonnet", "deepseek-coder", "gpt-4o",
+        "nvidia-devstral", "nvidia-deepseek-v3", "nvidia-llama",
+    ],
+    TaskType.INTEGRATION_TEST: [
+        "claude-sonnet", "gpt-4o",
+        "nvidia-devstral", "nvidia-deepseek-v3", "nvidia-llama",
+    ],
 
-    # Docs & ops — lighter tasks
-    TaskType.WRITE_DOCS: ["gpt-4o-mini", "claude-haiku", "nvidia-llama"],
-    TaskType.DEPLOY: ["claude-haiku", "gpt-4o-mini", "nvidia-llama"],
-    TaskType.RESOLVE_CONFLICT: ["claude-sonnet", "gpt-4o", "nvidia-llama"],
+    # ── Docs & ops — lighter tasks (use smaller/faster models) ────
+    TaskType.WRITE_DOCS: [
+        "gpt-4o-mini", "claude-haiku",
+        "nvidia-llama", "nvidia-llama-3b",
+    ],
+    TaskType.DEPLOY: [
+        "claude-haiku", "gpt-4o-mini",
+        "nvidia-llama", "nvidia-llama-3b",
+    ],
+    TaskType.RESOLVE_CONFLICT: [
+        "claude-sonnet", "gpt-4o",
+        "nvidia-deepseek-v3", "nvidia-llama-405b", "nvidia-llama",
+    ],
 }
 
 
