@@ -172,6 +172,17 @@ async def inject_requirement(project_id: str, req: InjectRequirementRequest):
     if not project:
         raise HTTPException(404, "Project not found")
 
+    # Find the last completed task + its agent to link the injected task
+    # to the existing graph (avoids disconnected nodes)
+    tasks = await _db.get_tasks(project_id)
+    last_agent_id = None
+    last_task_id = None
+    for t in sorted(tasks, key=lambda x: x.get("created_at", ""), reverse=True):
+        if t.get("assigned_agent_id"):
+            last_agent_id = t["assigned_agent_id"]
+            last_task_id = t["id"]
+            break
+
     task = Task(
         type=TaskType.ANALYZE_REQUIREMENTS,
         payload={
@@ -181,6 +192,8 @@ async def inject_requirement(project_id: str, req: InjectRequirementRequest):
         },
         priority=TaskPriority(req.priority),
         project_id=project_id,
+        parent_task_id=last_task_id,
+        spawned_by_agent_id=last_agent_id,
     )
     await _task_queue.submit(task)
 

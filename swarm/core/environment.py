@@ -25,21 +25,65 @@ logger = logging.getLogger("swarm.environment")
 
 
 # Reactive trigger rules: artifact type → task(s) to auto-submit
+# This is THE chain that drives the entire swarm.
+# requirements_doc → architecture → decompose → build/design/test → review → deploy
 REACTIVE_TRIGGERS: dict[ArtifactType, list[dict[str, Any]]] = {
-    ArtifactType.CODE_FILE: [
-        {"type": TaskType.REVIEW_CODE, "priority": TaskPriority.HIGH, "label": "Auto-review"},
+    # ── CRITICAL: This was MISSING — broke the entire agent chain ──
+    ArtifactType.REQUIREMENTS_DOC: [
+        {"type": TaskType.PLAN_ARCHITECTURE, "priority": TaskPriority.CRITICAL, "label": "Architecture from requirements"},
     ],
+
+    # architecture_plan is handled specially below (decompose into build tasks)
+    # but also trigger a database design task immediately
+    ArtifactType.ARCHITECTURE_PLAN: [],  # handled specially — decompose into build tasks
+
+    # Database schema → trigger API creation
+    ArtifactType.DATABASE_SCHEMA: [
+        {"type": TaskType.CREATE_API, "priority": TaskPriority.HIGH, "label": "API from database schema"},
+    ],
+
+    # Code file → auto-review + auto-test
+    ArtifactType.CODE_FILE: [
+        {"type": TaskType.REVIEW_CODE, "priority": TaskPriority.HIGH, "label": "Auto-review code"},
+        {"type": TaskType.WRITE_TESTS, "priority": TaskPriority.NORMAL, "label": "Auto-test for code"},
+    ],
+
+    # API spec → generate tests
     ArtifactType.API_SPEC: [
         {"type": TaskType.WRITE_TESTS, "priority": TaskPriority.NORMAL, "label": "Auto-test for API spec"},
     ],
-    ArtifactType.BUG_REPORT: [
-        {"type": TaskType.DEBUG, "priority": TaskPriority.HIGH, "label": "Auto-debug"},
-    ],
+
+    # Frontend component → review
     ArtifactType.FRONTEND_COMPONENT: [
         {"type": TaskType.REVIEW_CODE, "priority": TaskPriority.NORMAL, "label": "Auto-review frontend"},
     ],
-    ArtifactType.REVIEW: [],  # handled specially — check for issues
-    ArtifactType.ARCHITECTURE_PLAN: [],  # handled specially — decompose into build tasks
+
+    # UI design → build frontend component
+    ArtifactType.UI_DESIGN: [
+        {"type": TaskType.BUILD_FRONTEND_COMPONENT, "priority": TaskPriority.HIGH, "label": "Build UI from design"},
+    ],
+
+    # Test suite → generate docs when tests pass
+    ArtifactType.TEST_SUITE: [
+        {"type": TaskType.WRITE_DOCS, "priority": TaskPriority.LOW, "label": "Document tested code"},
+    ],
+
+    # Bug report → auto-debug
+    ArtifactType.BUG_REPORT: [
+        {"type": TaskType.DEBUG, "priority": TaskPriority.HIGH, "label": "Auto-debug"},
+    ],
+
+    # Review with issues is handled specially below
+    ArtifactType.REVIEW: [],
+
+    # Documentation → no auto-trigger (terminal node)
+    ArtifactType.DOCUMENTATION: [],
+
+    # Deployment config → no auto-trigger (terminal node)
+    ArtifactType.DEPLOYMENT_CONFIG: [],
+
+    # Decision → no auto-trigger
+    ArtifactType.DECISION: [],
 }
 
 
@@ -197,36 +241,61 @@ class Environment:
         if artifact.type == ArtifactType.ARCHITECTURE_PLAN:
             metadata = artifact.metadata or {}
             components = metadata.get("components", [])
-            if components:
-                tasks_to_submit = []
-                for comp in components:
-                    comp_type = comp.get("type", "write_code")
-                    try:
-                        task_type = TaskType(comp_type)
-                    except ValueError:
-                        task_type = TaskType.WRITE_CODE
 
-                    new_task = Task(
-                        type=task_type,
-                        payload={
-                            "trigger": "architecture_decomposition",
-                            "component": comp.get("name", ""),
-                            "description": comp.get("description", ""),
-                            "architecture_artifact_id": artifact.id,
-                        },
-                        priority=TaskPriority(comp.get("priority", TaskPriority.NORMAL)),
-                        project_id=artifact.project_id,
-                        parent_task_id=artifact.task_id,
-                        spawned_by_agent_id=artifact.agent_id,
-                        dependencies=comp.get("dependencies", []),
-                    )
-                    tasks_to_submit.append(new_task)
+            # ── FALLBACK: If LLM didn't produce parseable components,
+            # always spawn a sensible default set of build tasks ──
+            if not components:
+                logger.warning(
+                    "Architecture plan had no COMPONENTS JSON. "
+                    "Spawning default build tasks as fallback."
+                )
+                components = [
+                    {"name": "Database Schema", "type": "design_database",
+                     "description": "Design database tables and relationships from the architecture plan",
+                     "priority": 3},
+                    {"name": "Backend API", "type": "create_api",
+                     "description": "Create the REST API endpoints described in the architecture",
+                     "priority": 2},
+                    {"name": "UI Design", "type": "design_ui",
+                     "description": "Design the user interface and screens from the architecture plan",
+                     "priority": 2},
+                    {"name": "Core Business Logic", "type": "write_code",
+                     "description": "Implement core business logic and services",
+                     "priority": 2},
+                    {"name": "Deployment Config", "type": "deploy",
+                     "description": "Create deployment configuration and infrastructure setup",
+                     "priority": 1},
+                ]
 
-                if tasks_to_submit:
-                    await self.task_queue.submit_batch(tasks_to_submit)
-                    logger.info(
-                        f"Architecture decomposition: {len(tasks_to_submit)} build tasks spawned"
-                    )
+            tasks_to_submit = []
+            for comp in components:
+                comp_type = comp.get("type", "write_code")
+                try:
+                    task_type = TaskType(comp_type)
+                except ValueError:
+                    task_type = TaskType.WRITE_CODE
+
+                new_task = Task(
+                    type=task_type,
+                    payload={
+                        "trigger": "architecture_decomposition",
+                        "component": comp.get("name", ""),
+                        "description": comp.get("description", ""),
+                        "architecture_artifact_id": artifact.id,
+                    },
+                    priority=TaskPriority(comp.get("priority", TaskPriority.NORMAL)),
+                    project_id=artifact.project_id,
+                    parent_task_id=artifact.task_id,
+                    spawned_by_agent_id=artifact.agent_id,
+                    dependencies=comp.get("dependencies", []),
+                )
+                tasks_to_submit.append(new_task)
+
+            if tasks_to_submit:
+                await self.task_queue.submit_batch(tasks_to_submit)
+                logger.info(
+                    f"Architecture decomposition: {len(tasks_to_submit)} build tasks spawned"
+                )
 
     async def _check_unblocked_tasks(self, artifact: Artifact) -> None:
         """

@@ -265,15 +265,21 @@ class SwarmAgent:
         # Special instructions for architecture plans
         if self.task.type == TaskType.PLAN_ARCHITECTURE:
             parts.append("")
-            parts.append("## Architecture Plan Special Instructions")
-            parts.append("After your plan, include a COMPONENTS section as JSON:")
-            parts.append("```json")
+            parts.append("## CRITICAL: Architecture Decomposition")
+            parts.append("You MUST end your plan with a COMPONENTS JSON block.")
+            parts.append("This is REQUIRED — it tells the swarm which agents to spawn next.")
+            parts.append("Include at least 3-5 components. Format EXACTLY like this:")
+            parts.append("")
             parts.append("COMPONENTS: [")
-            parts.append('  {"name": "component_name", "type": "task_type", "description": "...", "priority": 2, "dependencies": ["tag1"]},')
-            parts.append("  ...")
+            parts.append('  {"name": "Database Schema", "type": "design_database", "description": "Design all tables and relationships", "priority": 3},')
+            parts.append('  {"name": "REST API", "type": "create_api", "description": "Build API endpoints for all resources", "priority": 2},')
+            parts.append('  {"name": "User Interface", "type": "design_ui", "description": "Design all screens and user flows", "priority": 2},')
+            parts.append('  {"name": "Core Logic", "type": "write_code", "description": "Implement business logic and services", "priority": 2},')
+            parts.append('  {"name": "Frontend Components", "type": "build_frontend_component", "description": "Build React/UI components", "priority": 2, "dependencies": ["design_ui"]},')
+            parts.append('  {"name": "Deployment", "type": "deploy", "description": "Setup deployment and infrastructure", "priority": 1}')
             parts.append("]")
-            parts.append("```")
-            parts.append("Valid task types: create_api, design_database, build_frontend_component, write_docs, deploy")
+            parts.append("")
+            parts.append("Valid types: design_database, create_api, design_ui, write_code, build_frontend_component, write_docs, deploy, write_tests")
 
         # Special instructions for reviews
         if self.task.type == TaskType.REVIEW_CODE:
