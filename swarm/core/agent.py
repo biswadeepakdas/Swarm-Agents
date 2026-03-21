@@ -54,8 +54,8 @@ TASK_OUTPUT_MAP: dict[TaskType, ArtifactType] = {
     TaskType.RESOLVE_CONFLICT: ArtifactType.DECISION,
 }
 
-# Maximum tool-use iterations per agent
-MAX_TOOL_STEPS = 8
+# Maximum tool-use iterations per agent (keep low for fast completion)
+MAX_TOOL_STEPS = 5
 
 
 class SwarmAgent:
@@ -331,19 +331,19 @@ class SwarmAgent:
 
             elif name == "web_search":
                 if not self._web_search:
-                    return "Web search unavailable. Proceed with your existing knowledge."
-                # Track search failures to prevent burning all tool steps on broken search
-                if not hasattr(self, '_search_failures'):
-                    self._search_failures = 0
-                if self._search_failures >= 2:
-                    return "Web search is not working. Please proceed with your existing knowledge and submit your artifact."
+                    return "Web search unavailable. Proceed with your existing knowledge and submit your artifact."
+                # Limit to 2 searches per agent — no more research after that
+                if not hasattr(self, '_search_count'):
+                    self._search_count = 0
+                self._search_count += 1
+                if self._search_count > 2:
+                    return "You've already searched twice. Stop researching and submit your artifact now using submit_artifact."
                 results = await self._web_search.search(
                     args.get("query", ""),
-                    max_results=args.get("max_results", 5),
+                    max_results=args.get("max_results", 3),
                 )
                 if not results:
-                    self._search_failures += 1
-                    return "No results found. Web search may be unavailable. Continue with your existing knowledge."
+                    return "No results found. Proceed with your existing knowledge and submit your artifact."
                 return "\n\n".join(
                     f"**{r.title}**\n{r.url}\n{r.snippet}" for r in results
                 )
