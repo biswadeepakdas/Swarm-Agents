@@ -331,13 +331,19 @@ class SwarmAgent:
 
             elif name == "web_search":
                 if not self._web_search:
-                    return "Error: Web search not available."
+                    return "Web search unavailable. Proceed with your existing knowledge."
+                # Track search failures to prevent burning all tool steps on broken search
+                if not hasattr(self, '_search_failures'):
+                    self._search_failures = 0
+                if self._search_failures >= 2:
+                    return "Web search is not working. Please proceed with your existing knowledge and submit your artifact."
                 results = await self._web_search.search(
                     args.get("query", ""),
                     max_results=args.get("max_results", 5),
                 )
                 if not results:
-                    return "No results found."
+                    self._search_failures += 1
+                    return "No results found. Web search may be unavailable. Continue with your existing knowledge."
                 return "\n\n".join(
                     f"**{r.title}**\n{r.url}\n{r.snippet}" for r in results
                 )
