@@ -101,6 +101,19 @@ async def create_project(req: CreateProjectRequest):
     }
 
 
+@router.delete("/projects/{project_id}")
+async def delete_project(project_id: str):
+    """Delete a project and all its agents, tasks, and artifacts."""
+    project = await _db.get_project(project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+
+    await _db.delete_project(project_id)
+    logger.info(f"Project deleted: {project_id}")
+
+    return {"message": f"Project '{project.get('name', '')}' deleted.", "id": project_id}
+
+
 @router.get("/projects/{project_id}")
 async def get_project(project_id: str):
     """Get project status with summary."""

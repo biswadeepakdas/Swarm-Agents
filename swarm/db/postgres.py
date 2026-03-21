@@ -76,6 +76,16 @@ class PostgresDB:
         async with self.pool.acquire() as conn:
             await conn.execute(sql, *vals)
 
+    async def delete_project(self, project_id: str) -> None:
+        """Delete a project and all its related data (tasks, agents, artifacts)."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("DELETE FROM artifacts WHERE project_id = $1", project_id)
+                await conn.execute("DELETE FROM agents WHERE project_id = $1", project_id)
+                await conn.execute("DELETE FROM tasks WHERE project_id = $1", project_id)
+                await conn.execute("DELETE FROM projects WHERE id = $1", project_id)
+        logger.info(f"Project {project_id} and all related data deleted")
+
     # ── Task CRUD ─────────────────────────────────────────────────
 
     async def create_task(self, task: dict[str, Any]) -> None:

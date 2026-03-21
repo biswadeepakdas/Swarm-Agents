@@ -538,17 +538,68 @@ function addProjectToSidebar(id, name, brief, status) {
   card.className = 'project-card';
   card.dataset.id = id;
   card.innerHTML = `
-    <div class="project-card-name">
-      <span class="project-status-dot ${status || 'active'}"></span>
-      ${escapeHtml(name)}
+    <div class="project-card-top">
+      <div class="project-card-name">
+        <span class="project-status-dot ${status || 'active'}"></span>
+        ${escapeHtml(name)}
+      </div>
+      <button class="btn-delete-project" title="Delete project" data-id="${id}">&times;</button>
     </div>
     <div class="project-card-brief">${escapeHtml(brief)}</div>
     <div class="project-card-meta">
       <span>${new Date().toLocaleDateString()}</span>
     </div>
   `;
+  card.querySelector('.project-card-name').addEventListener('click', (e) => {
+    e.stopPropagation();
+    selectProject(id);
+  });
   card.addEventListener('click', () => selectProject(id));
+  card.querySelector('.btn-delete-project').addEventListener('click', (e) => {
+    e.stopPropagation();
+    deleteProject(id, name);
+  });
   dom.projectList.prepend(card);
+}
+
+async function deleteProject(id, name) {
+  if (!confirm(`Delete project "${name}" and all its agents, tasks, and artifacts?`)) return;
+
+  try {
+    const res = await fetch(`${API_BASE}/projects/${id}`, { method: 'DELETE' });
+    if (res.ok) {
+      // Remove card from sidebar
+      const card = $(`.project-card[data-id="${id}"]`);
+      if (card) card.remove();
+
+      // If this was the active project, clear state
+      if (state.activeProjectId === id) {
+        state.activeProjectId = null;
+        state.tasks = [];
+        state.agents = [];
+        state.artifacts = [];
+        if (state.ws) { state.ws.close(); state.ws = null; }
+        dom.activityFeed.innerHTML = '<div class="empty-state">Select a project to see live activity.</div>';
+        dom.agentGrid.innerHTML = '<div class="empty-state">No agents spawned yet.</div>';
+        dom.artifactList.innerHTML = '<div class="empty-state">Artifacts will appear here as agents produce work.</div>';
+        dom.statAgents.textContent = '0';
+        dom.statTasks.textContent = '0';
+        dom.statArtifacts.textContent = '0';
+      }
+
+      // Show empty state if no projects left
+      if (!dom.projectList.querySelector('.project-card')) {
+        dom.projectList.innerHTML = '<div class="empty-state">No projects yet. Launch a build to start.</div>';
+      }
+
+      showToast(`Project "${name}" deleted.`, 'ok');
+    } else {
+      const data = await res.json().catch(() => ({}));
+      showToast(`Delete failed: ${data.detail || res.statusText}`, 'error');
+    }
+  } catch (err) {
+    showToast(`Delete failed: ${err.message}`, 'error');
+  }
 }
 
 // Override the launch to also add to sidebar
