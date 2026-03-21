@@ -50,6 +50,9 @@ class MemoryDB:
     async def get_project(self, project_id: str) -> dict[str, Any] | None:
         return self.projects.get(str(project_id))
 
+    async def get_projects(self) -> list[dict[str, Any]]:
+        return list(self.projects.values())
+
     async def update_project(self, project_id: str, **kwargs: Any) -> None:
         pid = str(project_id)
         if pid in self.projects:

@@ -71,10 +71,14 @@ class TaskQueue:
         """
         The main loop: read tasks from Redis Stream → spawn an agent for each.
         This is the heartbeat of the swarm.
+        Also runs a watchdog every 30s to kill zombie agents and auto-complete projects.
         """
         self._running = True
         await self.redis.ensure_consumer_group()
         logger.info(f"Spawn loop started (consumer={self._consumer_name}, max_concurrency={config.max_concurrency})")
+
+        import time as _time
+        last_watchdog = _time.time()
 
         while self._running:
             try:
@@ -82,6 +86,12 @@ class TaskQueue:
                 if not messages:
                     # Clean up finished agent tasks
                     self._cleanup_finished()
+
+                    # Watchdog: every 30s, kill zombie agents + auto-complete projects
+                    if _time.time() - last_watchdog > 30:
+                        last_watchdog = _time.time()
+                        await self._watchdog()
+
                     continue
 
                 for msg_id, task_data in messages:
@@ -100,6 +110,44 @@ class TaskQueue:
             except Exception:
                 logger.exception("Error in spawn loop")
                 await asyncio.sleep(1)
+
+    async def _watchdog(self) -> None:
+        """Periodic watchdog: kill stuck agents and auto-complete projects."""
+        try:
+            # Kill zombie agents (alive/working for more than timeout + 30s buffer)
+            result = await self.db.cleanup_stale_on_startup()
+            if result["zombie_agents"] or result["zombie_tasks"]:
+                logger.warning(f"Watchdog cleanup: {result}")
+
+            # Auto-complete projects where all tasks are done
+            await self._check_project_completion()
+        except Exception:
+            logger.exception("Watchdog error")
+
+    async def _check_project_completion(self) -> None:
+        """If all tasks in a project are completed/dead, mark project as completed."""
+        try:
+            from swarm.api.routes import _db as routes_db
+            # Get all active projects
+            projects = await self.db.get_projects() if hasattr(self.db, 'get_projects') else []
+            for p in projects:
+                if p.get("status") != "active":
+                    continue
+                pid = p["id"]
+                tasks = await self.db.get_tasks(pid)
+                if not tasks:
+                    continue
+                # Check if all tasks are terminal (completed, dead)
+                all_done = all(t.get("status") in ("completed", "dead") for t in tasks)
+                if all_done:
+                    await self.db.update_project(pid, status="completed")
+                    await self.redis.publish_event({
+                        "type": "project_completed",
+                        "project_id": pid,
+                    })
+                    logger.info(f"Project {pid} auto-completed (all {len(tasks)} tasks done)")
+        except Exception:
+            logger.exception("Project completion check error")
 
     def _on_agent_done(self, task_id: str, future: asyncio.Task) -> None:
         self._semaphore.release()

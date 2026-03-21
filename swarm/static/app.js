@@ -446,6 +446,14 @@ function handleSwarmEvent(event) {
       renderSwarmProgress();
       break;
 
+    case 'project_completed':
+      addFeedItem('complete',
+        `<strong>Project completed!</strong> All tasks finished.`
+      );
+      showToast('All tasks completed. Swarm finished.', 'ok');
+      renderSwarmProgress();
+      break;
+
     case 'llm_usage':
       // Silent — just track
       break;

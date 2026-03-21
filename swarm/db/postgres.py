@@ -63,6 +63,11 @@ class PostgresDB:
             row = await conn.fetchrow("SELECT * FROM projects WHERE id = $1", project_id)
             return dict(row) if row else None
 
+    async def get_projects(self) -> list[dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT * FROM projects ORDER BY created_at DESC")
+            return [dict(r) for r in rows]
+
     async def update_project(self, project_id: str, **kwargs: Any) -> None:
         sets = []
         vals = []
@@ -140,27 +145,30 @@ class PostgresDB:
             return [dict(r) for r in rows]
 
     async def cleanup_stale_on_startup(self) -> dict[str, int]:
-        """Mark zombie agents as dead and zombie tasks as failed on server restart.
-        Called once during lifespan startup to recover from unclean shutdown."""
+        """Mark zombie agents as dead and zombie tasks as failed.
+        Called on startup AND periodically by the watchdog.
+        Kills agents/tasks stuck for more than 3 minutes."""
         async with self.pool.acquire() as conn:
             async with conn.transaction():
-                # Kill zombie agents (alive/working but server restarted)
+                # Kill zombie agents (alive/working for more than 3 min)
                 r1 = await conn.execute(
                     "UPDATE agents SET status = 'dead', died_at = NOW() "
-                    "WHERE status IN ('alive', 'working')"
+                    "WHERE status IN ('alive', 'working') "
+                    "AND created_at < NOW() - INTERVAL '3 minutes'"
                 )
                 zombie_agents = int(r1.split()[-1]) if r1 else 0
 
-                # Fail zombie tasks (active but no agent process)
+                # Fail zombie tasks (active for more than 3 min)
                 r2 = await conn.execute(
-                    "UPDATE tasks SET status = 'dead', error = 'Server restarted — agent process lost' "
-                    "WHERE status = 'active'"
+                    "UPDATE tasks SET status = 'dead', error = 'Agent timed out (watchdog)' "
+                    "WHERE status = 'active' "
+                    "AND started_at < NOW() - INTERVAL '3 minutes'"
                 )
                 zombie_tasks = int(r2.split()[-1]) if r2 else 0
 
         if zombie_agents or zombie_tasks:
             logger.warning(
-                f"Startup cleanup: killed {zombie_agents} zombie agents, "
+                f"Cleanup: killed {zombie_agents} zombie agents, "
                 f"failed {zombie_tasks} zombie tasks"
             )
         return {"zombie_agents": zombie_agents, "zombie_tasks": zombie_tasks}

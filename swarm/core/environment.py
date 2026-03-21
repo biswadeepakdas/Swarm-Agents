@@ -71,9 +71,10 @@ REACTIVE_TRIGGERS: dict[ArtifactType, list[dict[str, Any]]] = {
 }
 
 # Max depth for reactive trigger chains to prevent infinite loops
-# depth 0 = original build task, depth 1 = review triggered by build,
-# depth 2 = fix triggered by review → STOP (no more reviews after a fix)
-MAX_TRIGGER_DEPTH = 2
+# depth 0 = original build task, depth 1 = review/test triggered by build → STOP
+# The code→review→fix→review infinite loop was killing the swarm.
+# One round of review is enough — if the review finds issues, they stay as notes.
+MAX_TRIGGER_DEPTH = 1
 
 
 class Environment:
