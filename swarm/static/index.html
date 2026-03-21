@@ -77,6 +77,17 @@
 
       <!-- Tab: Live activity feed -->
       <div class="tab-content active" id="tabActivity">
+        <!-- Swarm progress banner -->
+        <div class="swarm-progress hidden" id="swarmProgress">
+          <div class="swarm-progress-header">
+            <span class="swarm-progress-status" id="swarmProgressStatus">IDLE</span>
+            <span class="swarm-progress-summary" id="swarmProgressSummary"></span>
+          </div>
+          <div class="swarm-progress-bar-track">
+            <div class="swarm-progress-bar-fill" id="swarmProgressBar" style="width:0%"></div>
+          </div>
+          <div class="swarm-progress-agents" id="swarmProgressAgents"></div>
+        </div>
         <div class="activity-feed" id="activityFeed">
           <div class="empty-state">Select a project to see live activity.</div>
         </div>

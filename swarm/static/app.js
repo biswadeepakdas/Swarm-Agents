@@ -239,9 +239,94 @@ async function refreshProject(projectId) {
       state.artifacts = data.artifacts || [];
       renderArtifactList();
     }
+
+    // Update progress banner
+    renderSwarmProgress();
   } catch (err) {
     addFeedItem('fail', `Failed to load project data: ${err.message}`);
   }
+}
+
+// ── Swarm Progress Banner ───────────────────────────────────
+
+// Track live agent phases from WebSocket events
+const _agentPhases = {};
+
+function renderSwarmProgress() {
+  const banner = document.getElementById('swarmProgress');
+  const statusEl = document.getElementById('swarmProgressStatus');
+  const summaryEl = document.getElementById('swarmProgressSummary');
+  const barEl = document.getElementById('swarmProgressBar');
+  const agentsEl = document.getElementById('swarmProgressAgents');
+  if (!banner) return;
+
+  const tasks = state.tasks || [];
+  const agents = state.agents || [];
+
+  if (tasks.length === 0 && agents.length === 0) {
+    banner.classList.add('hidden');
+    return;
+  }
+  banner.classList.remove('hidden');
+
+  // Count task states
+  const completed = tasks.filter(t => t.status === 'completed' || t.status === 'dead').length;
+  const active = tasks.filter(t => t.status === 'active').length;
+  const pending = tasks.filter(t => t.status === 'pending').length;
+  const waiting = tasks.filter(t => t.status === 'waiting').length;
+  const total = tasks.length;
+  const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+  // Count agent states
+  const aliveAgents = agents.filter(a => a.status === 'alive' || a.status === 'working');
+  const deadAgents = agents.filter(a => a.status === 'dead');
+
+  // Determine overall status
+  let statusText, statusClass;
+  if (active > 0 || aliveAgents.length > 0) {
+    statusText = 'WORKING';
+    statusClass = 'working';
+  } else if (completed === total && total > 0) {
+    statusText = 'COMPLETED';
+    statusClass = 'completed';
+  } else if (tasks.some(t => t.status === 'dead' && t.error)) {
+    statusText = 'STALLED';
+    statusClass = 'error';
+  } else {
+    statusText = 'IDLE';
+    statusClass = 'idle';
+  }
+
+  statusEl.textContent = statusText;
+  statusEl.className = `swarm-progress-status ${statusClass}`;
+
+  // Summary text
+  const parts = [];
+  if (aliveAgents.length > 0) parts.push(`${aliveAgents.length} agent${aliveAgents.length > 1 ? 's' : ''} working`);
+  parts.push(`${completed}/${total} tasks done`);
+  if (active > 0) parts.push(`${active} active`);
+  if (pending > 0) parts.push(`${pending} queued`);
+  if (waiting > 0) parts.push(`${waiting} waiting`);
+  const artifactCount = parseInt(dom.statArtifacts.textContent) || 0;
+  if (artifactCount > 0) parts.push(`${artifactCount} artifacts`);
+  summaryEl.textContent = parts.join(' · ');
+
+  // Progress bar
+  barEl.style.width = `${pct}%`;
+  barEl.style.background = statusClass === 'error' ? 'var(--red)' : statusClass === 'completed' ? 'var(--accent)' : 'var(--green)';
+
+  // Active agent chips
+  const chipAgents = aliveAgents.length > 0 ? aliveAgents : deadAgents.slice(-5);
+  agentsEl.innerHTML = chipAgents.map(a => {
+    const isAlive = a.status === 'alive' || a.status === 'working';
+    const phase = _agentPhases[a.id] || (isAlive ? 'working' : 'done');
+    const persona = a.persona || a.name || 'Agent';
+    return `<span class="swarm-agent-chip ${isAlive ? 'alive' : 'dead'}">
+      <span class="chip-dot"></span>
+      ${escapeHtml(persona)}
+      <span class="chip-phase">${phase}</span>
+    </span>`;
+  }).join('');
 }
 
 // ── WebSocket ────────────────────────────────────────────────
@@ -300,18 +385,22 @@ function connectWebSocket(projectId) {
 function handleSwarmEvent(event) {
   switch (event.type) {
     case 'agent_spawned':
+      if (event.agent_id) _agentPhases[event.agent_id] = 'spawned';
       addFeedItem('spawn',
         `Agent spawned: <strong>${event.agent_name}</strong> ` +
         `for <span class="tag">${event.task_type}</span>`
       );
       dom.statAgents.textContent = parseInt(dom.statAgents.textContent) + 1;
+      renderSwarmProgress();
       break;
 
     case 'agent_died':
+      if (event.agent_id) _agentPhases[event.agent_id] = event.error ? 'failed' : 'done';
       addFeedItem('death',
         `Agent retired: <strong>${event.agent_name}</strong>` +
         (event.error ? ` (error: ${event.error})` : '')
       );
+      renderSwarmProgress();
       break;
 
     case 'task_submitted':
@@ -326,6 +415,7 @@ function handleSwarmEvent(event) {
       addFeedItem('complete',
         `Task completed: <strong>${event.task_id}</strong>`
       );
+      renderSwarmProgress();
       break;
 
     case 'task_failed':
@@ -333,6 +423,7 @@ function handleSwarmEvent(event) {
         `Task failed: <strong>${event.task_id}</strong> — ${event.error} ` +
         `(retry ${event.retry_count})`
       );
+      renderSwarmProgress();
       break;
 
     case 'artifact_created':
@@ -345,11 +436,14 @@ function handleSwarmEvent(event) {
       break;
 
     case 'agent_progress':
+      // Track phase for progress banner
+      if (event.agent_id) _agentPhases[event.agent_id] = event.phase;
       addFeedItem('task',
         `<strong>${event.agent_name || 'Agent'}</strong> ` +
         `<span class="tag">${event.phase}</span> ` +
         (event.detail ? `— ${escapeHtml(event.detail)}` : '')
       );
+      renderSwarmProgress();
       break;
 
     case 'llm_usage':
