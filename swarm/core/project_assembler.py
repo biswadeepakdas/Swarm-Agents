@@ -118,9 +118,21 @@ async def assemble_project(db: PostgresDB, project_id: str) -> dict[str, Any]:
     if not project:
         raise ValueError(f"Project {project_id} not found")
 
-    artifacts = await db.query_artifacts(project_id)
+    artifacts = await db.query_artifacts(str(project_id))
     if not artifacts:
         return {"files": [], "manifest": {"project": project.get("name"), "artifact_count": 0}}
+
+    # Ensure all artifacts are dicts (handle edge cases)
+    clean_artifacts = []
+    for a in artifacts:
+        if isinstance(a, dict):
+            # Ensure tags is a list, not a string
+            tags = a.get("tags", [])
+            if isinstance(tags, str):
+                tags = [t.strip() for t in tags.split(",") if t.strip()]
+            a["tags"] = tags
+            clean_artifacts.append(a)
+    artifacts = clean_artifacts
 
     files = []
     used_paths = set()
