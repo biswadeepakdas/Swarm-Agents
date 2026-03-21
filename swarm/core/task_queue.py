@@ -33,6 +33,7 @@ class TaskQueue:
         self._semaphore = asyncio.Semaphore(config.max_concurrency)
         self._consumer_name = f"worker-{uuid.uuid4().hex[:8]}"
         self._active_agents: dict[str, asyncio.Task] = {}
+        self._recovered_tasks: set[str] = set()  # Track tasks we've already re-submitted
 
     def set_environment(self, env: Environment) -> None:
         self.environment = env
@@ -116,17 +117,50 @@ class TaskQueue:
                 await asyncio.sleep(1)
 
     async def _watchdog(self) -> None:
-        """Periodic watchdog: kill stuck agents and auto-complete projects."""
+        """Periodic watchdog: kill stuck agents, recover orphaned tasks, auto-complete projects."""
         try:
             # Kill zombie agents (alive/working for more than timeout + 30s buffer)
             result = await self.db.cleanup_stale_on_startup()
             if result["zombie_agents"] or result["zombie_tasks"]:
                 logger.warning(f"Watchdog cleanup: {result}")
 
+            # Recover orphaned pending tasks (in DB but lost from Redis)
+            await self._recover_orphaned_tasks()
+
             # Auto-complete projects where all tasks are done
             await self._check_project_completion()
         except Exception:
             logger.exception("Watchdog error")
+
+    async def _recover_orphaned_tasks(self) -> None:
+        """Re-submit pending tasks that have been stuck for >60s (lost Redis messages)."""
+        try:
+            projects = await self.db.get_projects() if hasattr(self.db, 'get_projects') else []
+            for p in projects:
+                if p.get("status") != "active":
+                    continue
+                pid = str(p["id"])
+                tasks = await self.db.get_tasks(pid, status="pending")
+                for t in tasks:
+                    created = t.get("created_at")
+                    if not created:
+                        continue
+                    # Only recover tasks pending for more than 60 seconds
+                    if isinstance(created, str):
+                        from datetime import datetime, timezone
+                        try:
+                            created = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                        except Exception:
+                            continue
+                    age = (datetime.now(timezone.utc) - created).total_seconds()
+                    tid = t["id"]
+                    if age > 60 and tid not in self._recovered_tasks and tid not in self._active_agents:
+                        task_obj = Task.from_dict(t)
+                        await self.redis.submit_task(task_obj.to_dict())
+                        self._recovered_tasks.add(tid)
+                        logger.warning(f"Watchdog: re-submitted orphaned task {tid} (pending {age:.0f}s)")
+        except Exception:
+            logger.exception("Orphaned task recovery error")
 
     async def _check_project_completion(self) -> None:
         """If all tasks in a project are completed/dead, mark project as completed."""
