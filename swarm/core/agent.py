@@ -292,32 +292,45 @@ class SwarmAgent:
         import asyncio as _asyncio
         import os
 
-        # Set provider-specific env vars for litellm auto-detection
-        if config.llm_api_key:
-            if "nvidia" in config.llm_provider.lower() or "nvidia" in self._model.lower():
-                os.environ["NVIDIA_NIM_API_KEY"] = config.llm_api_key
-            elif "anthropic" in config.llm_provider.lower():
-                os.environ.setdefault("ANTHROPIC_API_KEY", config.llm_api_key)
-            else:
-                os.environ.setdefault("OPENAI_API_KEY", config.llm_api_key)
+        # Determine the correct litellm model string and api_base
+        model = self._model
+        api_base = None
+
+        # NVIDIA NIM: litellm's nvidia_nim/ provider hangs.
+        # Use openai/ prefix with api_base instead — NVIDIA's API is OpenAI-compatible.
+        if "nvidia" in config.llm_provider.lower() or "nvidia_nim" in model.lower():
+            # Strip nvidia_nim/ prefix if present, use openai/ instead
+            clean_model = model.replace("nvidia_nim/", "")
+            model = f"openai/{clean_model}"
+            api_base = "https://integrate.api.nvidia.com/v1"
+            os.environ["OPENAI_API_KEY"] = config.llm_api_key
+            logger.info(f"Using NVIDIA NIM via OpenAI-compat: model={model} api_base={api_base}")
+        elif "anthropic" in config.llm_provider.lower():
+            os.environ.setdefault("ANTHROPIC_API_KEY", config.llm_api_key or "")
+        elif config.llm_api_key:
+            os.environ.setdefault("OPENAI_API_KEY", config.llm_api_key)
 
         llm_timeout = 90  # seconds — hard cap on any single LLM call
 
         try:
-            logger.info(f"Agent {self.identity.id} calling LLM model={self._model} timeout={llm_timeout}s")
+            logger.info(f"Agent {self.identity.id} calling LLM model={model} timeout={llm_timeout}s")
+
+            call_kwargs = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "max_tokens": self._max_tokens,
+                "temperature": 0.7,
+                "api_key": config.llm_api_key,
+                "timeout": llm_timeout,
+            }
+            if api_base:
+                call_kwargs["api_base"] = api_base
 
             response = await _asyncio.wait_for(
-                litellm.acompletion(
-                    model=self._model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    max_tokens=self._max_tokens,
-                    temperature=0.7,
-                    api_key=config.llm_api_key,
-                    timeout=llm_timeout,  # litellm's own timeout
-                ),
+                litellm.acompletion(**call_kwargs),
                 timeout=llm_timeout + 10,  # asyncio hard timeout (slightly longer)
             )
             content = response.choices[0].message.content
