@@ -139,6 +139,32 @@ class PostgresDB:
                 )
             return [dict(r) for r in rows]
 
+    async def cleanup_stale_on_startup(self) -> dict[str, int]:
+        """Mark zombie agents as dead and zombie tasks as failed on server restart.
+        Called once during lifespan startup to recover from unclean shutdown."""
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                # Kill zombie agents (alive/working but server restarted)
+                r1 = await conn.execute(
+                    "UPDATE agents SET status = 'dead', died_at = NOW(), death_cause = 'server_restart' "
+                    "WHERE status IN ('alive', 'working')"
+                )
+                zombie_agents = int(r1.split()[-1]) if r1 else 0
+
+                # Fail zombie tasks (active but no agent process)
+                r2 = await conn.execute(
+                    "UPDATE tasks SET status = 'dead', error = 'Server restarted — agent process lost' "
+                    "WHERE status = 'active'"
+                )
+                zombie_tasks = int(r2.split()[-1]) if r2 else 0
+
+        if zombie_agents or zombie_tasks:
+            logger.warning(
+                f"Startup cleanup: killed {zombie_agents} zombie agents, "
+                f"failed {zombie_tasks} zombie tasks"
+            )
+        return {"zombie_agents": zombie_agents, "zombie_tasks": zombie_tasks}
+
     # ── Agent CRUD ────────────────────────────────────────────────
 
     async def create_agent(self, agent: dict[str, Any]) -> None:

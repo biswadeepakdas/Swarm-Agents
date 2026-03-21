@@ -55,6 +55,28 @@ class MemoryDB:
         if pid in self.projects:
             self.projects[pid].update(kwargs)
 
+    async def delete_project(self, project_id: str) -> None:
+        pid = str(project_id)
+        self.projects.pop(pid, None)
+        self.tasks = {k: v for k, v in self.tasks.items() if v.get("project_id") != pid}
+        self.agents = {k: v for k, v in self.agents.items() if v.get("project_id") != pid}
+        self.artifacts = {k: v for k, v in self.artifacts.items() if v.get("project_id") != pid}
+
+    async def cleanup_stale_on_startup(self) -> dict[str, int]:
+        zombie_agents = 0
+        for a in self.agents.values():
+            if a.get("status") in ("alive", "working"):
+                a["status"] = "dead"
+                a["death_cause"] = "server_restart"
+                zombie_agents += 1
+        zombie_tasks = 0
+        for t in self.tasks.values():
+            if t.get("status") == "active":
+                t["status"] = "dead"
+                t["error"] = "Server restarted"
+                zombie_tasks += 1
+        return {"zombie_agents": zombie_agents, "zombie_tasks": zombie_tasks}
+
     # ── Task CRUD ─────────────────────────────────────────────
 
     async def create_task(self, task: dict[str, Any]) -> None:

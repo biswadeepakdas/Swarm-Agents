@@ -87,6 +87,11 @@ async def lifespan(app: FastAPI):
     await _init_db()
     await redis_client.connect()
 
+    # 1b. Clean up zombie agents/tasks from previous unclean shutdown
+    cleanup = await db.cleanup_stale_on_startup()
+    if cleanup["zombie_agents"] or cleanup["zombie_tasks"]:
+        logger.warning(f"Cleaned up {cleanup['zombie_agents']} zombie agents, {cleanup['zombie_tasks']} zombie tasks")
+
     # 2. Initialize core components
     environment = Environment(db=db, redis=redis_client)
     task_queue = TaskQueue(redis=redis_client, db=db)
