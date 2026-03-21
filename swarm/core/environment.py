@@ -74,7 +74,7 @@ REACTIVE_TRIGGERS: dict[ArtifactType, list[dict[str, Any]]] = {
 # depth 0 = original build task, depth 1 = review/test triggered by build → STOP
 # The code→review→fix→review infinite loop was killing the swarm.
 # One round of review is enough — if the review finds issues, they stay as notes.
-MAX_TRIGGER_DEPTH = 1
+MAX_TRIGGER_DEPTH = 3  # requirements(0) → arch(1) → code(2) → review(3) → STOP
 
 
 class Environment:
@@ -209,8 +209,10 @@ class Environment:
 
         # ── Depth check: prevent infinite trigger loops ──
         # code(0) → review(1) → fix(2) → STOP. No more reviews after a fix.
+        # EXCEPTION: architecture_plan decomposition always runs (it's a fan-out, not a loop)
         depth = await self._get_trigger_depth(artifact)
-        if depth >= MAX_TRIGGER_DEPTH:
+        is_architecture_decomposition = artifact.type == ArtifactType.ARCHITECTURE_PLAN
+        if depth >= MAX_TRIGGER_DEPTH and not is_architecture_decomposition:
             logger.info(
                 f"Trigger depth {depth} >= {MAX_TRIGGER_DEPTH} for {artifact.type.value}. "
                 f"Stopping reactive chain to prevent infinite loop."
