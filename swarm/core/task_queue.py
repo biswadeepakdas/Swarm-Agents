@@ -134,6 +134,7 @@ class TaskQueue:
 
     async def _recover_orphaned_tasks(self) -> None:
         """Re-submit pending tasks that have been stuck for >60s (lost Redis messages)."""
+        from datetime import datetime as dt, timezone as tz
         try:
             projects = await self.db.get_projects() if hasattr(self.db, 'get_projects') else []
             for p in projects:
@@ -145,16 +146,17 @@ class TaskQueue:
                     created = t.get("created_at")
                     if not created:
                         continue
-                    # Only recover tasks pending for more than 60 seconds
                     if isinstance(created, str):
-                        from datetime import datetime, timezone
                         try:
-                            created = datetime.fromisoformat(created.replace("Z", "+00:00"))
+                            created = dt.fromisoformat(created.replace("Z", "+00:00"))
                         except Exception:
                             continue
-                    age = (datetime.now(timezone.utc) - created).total_seconds()
+                    age = (dt.now(tz.utc) - created).total_seconds()
                     tid = t["id"]
                     if age > 60 and tid not in self._recovered_tasks and tid not in self._active_agents:
+                        # Also release the Redis lock so the task can be picked up again
+                        lock_key = f"swarm:task_lock:{tid}"
+                        await self.redis.client.delete(lock_key)
                         task_obj = Task.from_dict(t)
                         await self.redis.submit_task(task_obj.to_dict())
                         self._recovered_tasks.add(tid)
@@ -310,6 +312,12 @@ class TaskQueue:
             await self._handle_failure(task, msg_id, str(e))
 
     async def _handle_failure(self, task: Task, msg_id: str, error: str) -> None:
+        # Release the task lock so retries can pick it up
+        lock_key = f"swarm:task_lock:{task.id}"
+        try:
+            await self.redis.client.delete(lock_key)
+        except Exception:
+            pass
         task.retry_count += 1
         if task.retry_count >= config.task_retry_limit:
             task.status = TaskStatus.DEAD
