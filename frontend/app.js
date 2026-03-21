@@ -589,6 +589,7 @@ function renderAgentGrid() {
 function renderArtifactList() {
   if (state.artifacts.length === 0) {
     dom.artifactList.innerHTML = '<div class="empty-state">Artifacts will appear here as agents produce work.</div>';
+    renderDeliverablesSummary();
     return;
   }
 
@@ -597,30 +598,168 @@ function renderArtifactList() {
   dom.artifactList.innerHTML = sorted.map(art => {
     const badgeClass = `badge-${art.type}`;
     const created = new Date(art.created_at).toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit' });
+    const icon = artifactIcon(art.type);
+    const sizeLabel = art.content ? `${Math.round(art.content.length / 1024 * 10) / 10}KB` : '';
     return `
       <div class="artifact-card" data-id="${art.id}" onclick="viewArtifact('${art.id}')">
-        <span class="artifact-type-badge ${badgeClass}">${art.type.replace(/_/g, ' ').toUpperCase()}</span>
+        <span class="artifact-type-badge ${badgeClass}">${icon} ${art.type.replace(/_/g, ' ').toUpperCase()}</span>
         <div class="artifact-name">${escapeHtml(art.name)}</div>
-        <div class="artifact-meta">${created} · ${(art.tags || []).join(', ')}</div>
+        <div class="artifact-meta">${created} ${sizeLabel ? '· ' + sizeLabel : ''} · ${(art.tags || []).join(', ')}</div>
       </div>
     `;
   }).join('');
+
+  renderDeliverablesSummary();
+}
+
+function artifactIcon(type) {
+  const icons = {
+    code_file: '{ }',
+    review: '✓',
+    test_suite: '▶',
+    deployment_config: '⚙',
+    database_schema: '⊞',
+    architecture_plan: '◫',
+    requirements_doc: '▤',
+    ui_design: '◧',
+    frontend_component: '◩',
+  };
+  return icons[type] || '◆';
+}
+
+function renderDeliverablesSummary() {
+  const summary = document.getElementById('deliverablesSummary');
+  const stats = document.getElementById('deliverablesStats');
+  if (!summary || !stats) return;
+
+  if (state.artifacts.length === 0) {
+    summary.classList.add('hidden');
+    return;
+  }
+
+  summary.classList.remove('hidden');
+
+  // Group by type
+  const groups = {};
+  state.artifacts.forEach(a => {
+    const t = a.type || 'unknown';
+    groups[t] = (groups[t] || 0) + 1;
+  });
+
+  stats.innerHTML = Object.entries(groups).map(([type, count]) => `
+    <span class="deliverable-chip">
+      ${artifactIcon(type)}
+      <span class="chip-count">${count}</span>
+      ${type.replace(/_/g, ' ')}
+    </span>
+  `).join('');
 }
 
 // ── Artifact detail viewer ───────────────────────────────────
 
+let _viewingArtifactId = null;
+
 window.viewArtifact = function(id) {
   const art = state.artifacts.find(a => String(a.id) === String(id));
   if (!art) return;
+  _viewingArtifactId = id;
 
   dom.detailName.textContent = art.name;
-  dom.detailMeta.textContent = `Type: ${art.type} · Agent: ${art.agent_id || '—'} · Tags: ${(art.tags || []).join(', ')}`;
+  const ext = guessExtension(art);
+  dom.detailMeta.textContent = `Type: ${art.type} · File: ${ext} · ${art.content ? Math.round(art.content.length/1024*10)/10 + 'KB' : ''} · Tags: ${(art.tags || []).join(', ')}`;
   dom.detailContent.textContent = art.content || '(empty)';
   dom.artifactDetail.classList.remove('hidden');
 };
 
+function guessExtension(art) {
+  const t = art.type || '';
+  const tags = (art.tags || []).join(' ').toLowerCase();
+  if (t === 'code_file') {
+    if (tags.includes('python') || tags.includes('fastapi')) return 'main.py';
+    if (tags.includes('react') || tags.includes('next')) return 'index.tsx';
+    if (tags.includes('javascript') || tags.includes('express')) return 'index.js';
+    return 'code.py';
+  }
+  if (t === 'test_suite') return 'tests.py';
+  if (t === 'deployment_config') return 'docker-compose.yml';
+  if (t === 'database_schema') return 'schema.sql';
+  if (t === 'requirements_doc') return 'requirements.md';
+  if (t === 'architecture_plan') return 'architecture.md';
+  if (t === 'review') return 'review.md';
+  if (t === 'ui_design') return 'ui_design.md';
+  if (t === 'frontend_component') return 'component.tsx';
+  return 'artifact.txt';
+}
+
+function downloadText(filename, content) {
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// Download single artifact
+document.getElementById('btnDownloadArtifact')?.addEventListener('click', () => {
+  const art = state.artifacts.find(a => String(a.id) === String(_viewingArtifactId));
+  if (!art || !art.content) return;
+  const safeName = art.name.replace(/[^a-zA-Z0-9_\-. ]/g, '_').replace(/\s+/g, '_');
+  const ext = guessExtension(art);
+  downloadText(`${safeName}.${ext.split('.').pop()}`, art.content);
+});
+
+// Copy artifact content
+document.getElementById('btnCopyArtifact')?.addEventListener('click', () => {
+  const art = state.artifacts.find(a => String(a.id) === String(_viewingArtifactId));
+  if (!art || !art.content) return;
+  navigator.clipboard.writeText(art.content).then(() => {
+    const btn = document.getElementById('btnCopyArtifact');
+    const old = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = old, 1500);
+  });
+});
+
+// Download ALL artifacts as a single concatenated file
+document.getElementById('btnDownloadAll')?.addEventListener('click', () => {
+  if (state.artifacts.length === 0) return;
+  const projectName = state.projects.find(p => p.id === state.activeProjectId)?.name || 'project';
+  const safeName = projectName.replace(/[^a-zA-Z0-9_\-. ]/g, '_').replace(/\s+/g, '_');
+
+  let combined = `# ${projectName} — Swarm Deliverables\n`;
+  combined += `# Generated: ${new Date().toISOString()}\n`;
+  combined += `# Total artifacts: ${state.artifacts.length}\n\n`;
+
+  // Group by type
+  const groups = {};
+  state.artifacts.forEach(a => {
+    const t = a.type || 'unknown';
+    if (!groups[t]) groups[t] = [];
+    groups[t].push(a);
+  });
+
+  for (const [type, arts] of Object.entries(groups)) {
+    combined += `${'═'.repeat(70)}\n`;
+    combined += `  ${type.replace(/_/g, ' ').toUpperCase()} (${arts.length} files)\n`;
+    combined += `${'═'.repeat(70)}\n\n`;
+
+    for (const art of arts) {
+      combined += `${'─'.repeat(50)}\n`;
+      combined += `  ${art.name}\n`;
+      combined += `  Tags: ${(art.tags || []).join(', ')}\n`;
+      combined += `${'─'.repeat(50)}\n\n`;
+      combined += (art.content || '(empty)') + '\n\n\n';
+    }
+  }
+
+  downloadText(`${safeName}_deliverables.txt`, combined);
+});
+
 dom.btnCloseDetail.addEventListener('click', () => {
   dom.artifactDetail.classList.add('hidden');
+  _viewingArtifactId = null;
 });
 
 dom.btnRefreshArtifacts.addEventListener('click', () => {

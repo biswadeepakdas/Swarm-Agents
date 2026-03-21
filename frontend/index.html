@@ -4,14 +4,10 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Swarm Control</title>
-  <link rel="stylesheet" href="/style.css">
+  <link id="appCss" rel="stylesheet" href="/static/style.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
   <script src="https://d3js.org/d3.v7.min.js"></script>
-  <script>
-    // Configure backend URL — set this to your Railway deployment
-    window.SWARM_API_URL = 'https://swarm-engine-production.up.railway.app';
-  </script>
 </head>
 <body>
   <!-- ═══════════════════════════════════════════════════════════
@@ -176,11 +172,24 @@
         <div class="empty-state">Artifacts will appear here as agents produce work.</div>
       </div>
 
+      <!-- Deliverables summary (shown when project has artifacts) -->
+      <div class="deliverables-summary hidden" id="deliverablesSummary">
+        <div class="deliverables-header">
+          <span class="deliverables-title">Deliverables</span>
+          <button class="btn btn-primary btn-sm" id="btnDownloadAll">Download All</button>
+        </div>
+        <div class="deliverables-stats" id="deliverablesStats"></div>
+      </div>
+
       <!-- Artifact detail viewer -->
       <div class="artifact-detail hidden" id="artifactDetail">
         <div class="detail-header">
           <h3 id="detailName"></h3>
-          <button class="btn btn-ghost btn-sm" id="btnCloseDetail">Close</button>
+          <div class="detail-actions">
+            <button class="btn btn-primary btn-sm" id="btnDownloadArtifact">Download</button>
+            <button class="btn btn-ghost btn-sm" id="btnCopyArtifact">Copy</button>
+            <button class="btn btn-ghost btn-sm" id="btnCloseDetail">Close</button>
+          </div>
         </div>
         <div class="detail-meta" id="detailMeta"></div>
         <pre class="detail-content" id="detailContent"></pre>
@@ -195,6 +204,6 @@
     </aside>
   </main>
 
-  <script src="/app.js"></script>
+  <script src="/static/app.js"></script>
 </body>
 </html>
