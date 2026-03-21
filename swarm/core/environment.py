@@ -75,6 +75,7 @@ REACTIVE_TRIGGERS: dict[ArtifactType, list[dict[str, Any]]] = {
 # The code→review→fix→review infinite loop was killing the swarm.
 # One round of review is enough — if the review finds issues, they stay as notes.
 MAX_TRIGGER_DEPTH = 3  # requirements(0) → arch(1) → code(2) → review(3) → STOP
+MAX_TASKS_PER_PROJECT = 30  # Hard cap to prevent exponential task explosion
 
 
 class Environment:
@@ -206,6 +207,18 @@ class Environment:
     async def _fire_reactive_triggers(self, artifact: Artifact) -> None:
         if not self.task_queue:
             return
+
+        # ── Task cap: prevent exponential task explosion ──
+        try:
+            existing_tasks = await self.db.get_tasks(artifact.project_id)
+            if len(existing_tasks) >= MAX_TASKS_PER_PROJECT:
+                logger.warning(
+                    f"Project {artifact.project_id} has {len(existing_tasks)} tasks "
+                    f"(cap={MAX_TASKS_PER_PROJECT}). No more reactive triggers."
+                )
+                return
+        except Exception:
+            pass
 
         # ── Depth check: prevent infinite trigger loops ──
         # code(0) → review(1) → fix(2) → STOP. No more reviews after a fix.
