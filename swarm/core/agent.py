@@ -1,8 +1,11 @@
 """
-The Swarm Agent — an autonomous entity.
+The Swarm Agent — an autonomous, tool-using entity.
 
-Lifecycle: born → load context → plan → query environment → execute → publish → die.
-Each agent gets its own identity, memory, persona, and LLM backbone.
+Lifecycle: born → load context → tool loop (think→act→observe) → publish → die.
+Each agent gets its own identity, memory, persona, tools, and LLM backbone.
+
+This is the Perplexity Computer-style agent: iterative tool use, multi-model
+routing, code execution, web search, and structured file output.
 """
 
 from __future__ import annotations
@@ -17,6 +20,8 @@ import litellm
 from swarm.config import config
 from swarm.core.agent_memory import AgentMemory
 from swarm.core.interaction import InteractionProtocol
+from swarm.core.model_router import ModelConfig, get_router
+from swarm.core.tool_registry import get_tools_for_task, get_tool_names_for_task
 from swarm.models.agent import AgentIdentity, AgentStatus
 from swarm.models.artifact import Artifact, ArtifactType
 from swarm.models.task import Task, TaskType
@@ -49,11 +54,14 @@ TASK_OUTPUT_MAP: dict[TaskType, ArtifactType] = {
     TaskType.RESOLVE_CONFLICT: ArtifactType.DECISION,
 }
 
+# Maximum tool-use iterations per agent
+MAX_TOOL_STEPS = 8
+
 
 class SwarmAgent:
     """
     An autonomous agent spawned for a single task.
-    Born, executes, publishes results, optionally spawns sub-tasks, then dies.
+    Uses iterative tool calling: think → call tool → observe → think → ... → submit artifact.
     """
 
     def __init__(
@@ -88,9 +96,44 @@ class SwarmAgent:
         # Interaction protocol
         self.interaction = InteractionProtocol(environment, task_queue)
 
-        # LLM config
-        self._model = config.llm_model
-        self._max_tokens = config.llm_max_tokens_per_agent
+        # Multi-model routing
+        self._model_config: ModelConfig = get_router().select_model(task.type)
+        self._model = self._model_config.model
+        self._max_tokens = self._model_config.max_tokens
+
+        # Tool state
+        self._tool_names = get_tool_names_for_task(task.type)
+        self._tool_schemas = get_tools_for_task(task.type)
+        self._submitted_artifact: dict | None = None  # Set by submit_artifact tool
+        self._files_written: list[str] = []  # Track files written via write_file tool
+
+        # Initialize file ops for this project
+        self._file_ops = None
+        self._code_runner = None
+        self._web_search = None
+        self._env_query = None
+
+    def _init_tools(self) -> None:
+        """Lazy-initialize tool instances."""
+        import tempfile
+        from pathlib import Path
+
+        if "write_file" in self._tool_names or "read_file" in self._tool_names:
+            from swarm.tools.file_ops import FileOps
+            project_dir = Path(tempfile.gettempdir()) / "swarm_output" / self.task.project_id
+            self._file_ops = FileOps(project_dir)
+
+        if "run_python" in self._tool_names:
+            from swarm.tools.code_runner import CodeRunner
+            self._code_runner = CodeRunner()
+
+        if "web_search" in self._tool_names:
+            from swarm.tools.web_search import WebSearchTool
+            self._web_search = WebSearchTool()
+
+        if "query_artifacts" in self._tool_names:
+            from swarm.tools.environment_query import EnvironmentQueryTool
+            self._env_query = EnvironmentQueryTool(self.environment, self.task.project_id)
 
     async def _emit_progress(self, phase: str, detail: str = "") -> None:
         """Emit a real-time progress event so the user sees what's happening."""
@@ -105,18 +148,16 @@ class SwarmAgent:
                 "detail": detail,
             })
         except Exception:
-            pass  # Never let progress events break the agent
+            pass
 
     async def execute(self) -> dict[str, Any]:
         """
         Main agent lifecycle:
         1. Register self in DB
         2. Load context from environment + memory
-        3. Discover relevant artifacts
-        4. Call LLM to produce output
-        5. Publish artifact to environment
-        6. Update memory
-        7. Die
+        3. Run tool-use loop (think → act → observe → ...)
+        4. Publish artifact to environment
+        5. Die
         """
         import time as _time
 
@@ -127,6 +168,9 @@ class SwarmAgent:
         await self._emit_progress("registered", "Agent online, loading context...")
 
         try:
+            # Initialize tools
+            self._init_tools()
+
             # 2. Load project context
             env_context = await self.environment.get_project_state(self.task.project_id)
             await self._emit_progress("context_loaded", f"Loaded project state ({len(env_context)} chars)")
@@ -138,50 +182,42 @@ class SwarmAgent:
             art_count = len(relevant_artifacts) if relevant_artifacts else 0
             await self._emit_progress("artifacts_discovered", f"Found {art_count} relevant artifact(s)")
 
-            # 4. Build prompt and call LLM
+            # 4. Build prompts
             system_prompt = await self._build_system_prompt(env_context, relevant_artifacts)
             user_prompt = self._build_user_prompt(relevant_artifacts)
 
-            await self.memory.append_reasoning({
-                "action": "calling_llm",
-                "result": f"Sending prompt ({len(system_prompt)} chars system, {len(user_prompt)} chars user)",
-            })
+            await self._emit_progress("calling_llm",
+                f"Using {self._model_config.model} ({len(system_prompt) + len(user_prompt)} chars)")
 
-            await self._emit_progress("calling_llm", f"Sending {len(system_prompt) + len(user_prompt)} chars to {self._model}...")
-
+            # 5. Run the tool-use loop
             t0 = _time.time()
-            llm_response = await self._call_llm(system_prompt, user_prompt)
+            artifact = await self._tool_loop(system_prompt, user_prompt)
             elapsed = _time.time() - t0
 
-            await self._emit_progress("llm_responded", f"LLM responded in {elapsed:.1f}s ({len(llm_response)} chars)")
-
-            # 5. Parse and publish artifact
-            artifact = self._parse_output(llm_response)
+            # 6. Publish artifact
             await self._emit_progress("publishing", f"Publishing {artifact.type.value}: {artifact.name}")
-
             await self.environment.publish_artifact(artifact)
 
-            await self.memory.append_reasoning({
-                "action": "published_artifact",
-                "result": f"Published {artifact.type.value}: {artifact.name}",
-            })
-
-            # 6. Store long-term memory
+            # 7. Store long-term memory
             memory_summary = (
                 f"Completed {self.task.type.value} task. "
                 f"Produced {artifact.type.value}: {artifact.name}. "
                 f"Tags: {artifact.tags}"
             )
+            if self._files_written:
+                memory_summary += f" Files: {', '.join(self._files_written)}"
             await self.memory.memorize(memory_summary, tags=artifact.tags)
 
-            # 7. Die
+            # 8. Die
             await self._die()
-            await self._emit_progress("completed", f"Done in {_time.time() - t0:.1f}s total")
+            await self._emit_progress("completed", f"Done in {elapsed:.1f}s total")
 
             return {
                 "artifact_id": artifact.id,
                 "artifact_type": artifact.type.value,
                 "artifact_name": artifact.name,
+                "files_written": self._files_written,
+                "model_used": self._model_config.model,
             }
 
         except Exception as e:
@@ -190,22 +226,345 @@ class SwarmAgent:
             await self._die(error=str(e))
             raise
 
-    # ── Prompt building ───────────────────────────────────────────
+    # ── Tool-Use Loop ──────────────────────────────────────────────
+
+    async def _tool_loop(self, system_prompt: str, user_prompt: str) -> Artifact:
+        """
+        Iterative tool-use loop: call LLM → if tool_call, execute tool → feed result back → repeat.
+        Stops when: agent calls submit_artifact, or max steps reached, or LLM returns no tool call.
+        """
+        import asyncio as _asyncio
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+
+        for step in range(MAX_TOOL_STEPS):
+            await self._emit_progress("tool_step", f"Step {step + 1}/{MAX_TOOL_STEPS}")
+
+            # Call LLM with tool definitions
+            response = await self._call_llm_with_tools(messages)
+            message = response.choices[0].message
+
+            # Track token usage
+            usage = response.usage
+            if usage:
+                logger.info(
+                    f"Agent {self.identity.id} LLM usage (step {step+1}): "
+                    f"prompt={usage.prompt_tokens} completion={usage.completion_tokens}"
+                )
+                await self.redis.publish_event({
+                    "type": "llm_usage",
+                    "agent_id": self.identity.id,
+                    "project_id": self.task.project_id,
+                    "model": self._model_config.model,
+                    "prompt_tokens": usage.prompt_tokens,
+                    "completion_tokens": usage.completion_tokens,
+                    "total_tokens": usage.total_tokens,
+                })
+
+            # Check if the LLM wants to call tools
+            tool_calls = getattr(message, 'tool_calls', None)
+
+            if not tool_calls:
+                # No tool call — LLM produced a final text response.
+                # Fall back to legacy parsing (for models that don't do function calling well)
+                content = message.content or ""
+                if self._submitted_artifact:
+                    return self._build_artifact_from_submission(self._submitted_artifact)
+                return self._parse_output(content)
+
+            # Append the assistant message (with tool calls) to conversation
+            messages.append(self._serialize_assistant_message(message))
+
+            # Execute each tool call
+            for tool_call in tool_calls:
+                fn_name = tool_call.function.name
+                try:
+                    args = json.loads(tool_call.function.arguments)
+                except json.JSONDecodeError:
+                    args = {}
+
+                await self._emit_progress("tool_call", f"Calling {fn_name}...")
+                logger.info(f"Agent {self.identity.id} tool call: {fn_name}({list(args.keys())})")
+
+                # Execute the tool
+                result = await self._execute_tool(fn_name, args)
+
+                # Append tool result to conversation
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": result[:4000],  # Cap tool output to control context size
+                })
+
+                # If submit_artifact was called, we're done
+                if fn_name == "submit_artifact" and self._submitted_artifact:
+                    return self._build_artifact_from_submission(self._submitted_artifact)
+
+        # Max steps reached — use whatever we have
+        logger.warning(f"Agent {self.identity.id} hit max tool steps ({MAX_TOOL_STEPS})")
+        if self._submitted_artifact:
+            return self._build_artifact_from_submission(self._submitted_artifact)
+
+        # Emergency: ask LLM for final output without tools
+        messages.append({"role": "user", "content": "You've used all your tool steps. Please provide your final ARTIFACT_NAME, ARTIFACT_TAGS, and ARTIFACT_CONTENT now."})
+        final_response = await self._call_llm_simple(messages)
+        return self._parse_output(final_response)
+
+    async def _execute_tool(self, name: str, args: dict) -> str:
+        """Dispatch a tool call and return the result as a string."""
+        try:
+            if name == "run_python":
+                if not self._code_runner:
+                    return "Error: Code execution not available for this task type."
+                result = await self._code_runner.run_python(args.get("code", ""))
+                output = f"Exit code: {result.exit_code}\n"
+                if result.stdout:
+                    output += f"STDOUT:\n{result.stdout}\n"
+                if result.stderr:
+                    output += f"STDERR:\n{result.stderr}\n"
+                if result.timed_out:
+                    output += "TIMED OUT\n"
+                return output
+
+            elif name == "web_search":
+                if not self._web_search:
+                    return "Error: Web search not available."
+                results = await self._web_search.search(
+                    args.get("query", ""),
+                    max_results=args.get("max_results", 5),
+                )
+                if not results:
+                    return "No results found."
+                return "\n\n".join(
+                    f"**{r.title}**\n{r.url}\n{r.snippet}" for r in results
+                )
+
+            elif name == "write_file":
+                if not self._file_ops:
+                    return "Error: File operations not available."
+                path = args.get("path", "")
+                content = args.get("content", "")
+                written_path = await self._file_ops.write_file(path, content)
+                self._files_written.append(path)
+                return f"File written: {path} ({len(content)} bytes)"
+
+            elif name == "read_file":
+                if not self._file_ops:
+                    return "Error: File operations not available."
+                content = await self._file_ops.read_file(args.get("path", ""))
+                return content[:4000]
+
+            elif name == "list_files":
+                if not self._file_ops:
+                    return "Error: File operations not available."
+                files = await self._file_ops.list_files(args.get("directory", "."))
+                return "\n".join(files) if files else "(no files yet)"
+
+            elif name == "query_artifacts":
+                if not self._env_query:
+                    return "Error: Environment query not available."
+                art_type = args.get("artifact_type")
+                tags = args.get("tags")
+                if art_type:
+                    results = await self._env_query.find_by_type(art_type)
+                elif tags:
+                    results = await self._env_query.find_by_tags(tags)
+                else:
+                    summary = await self._env_query.get_project_summary()
+                    return json.dumps(summary, default=str)[:4000]
+                # Return summaries
+                return "\n\n".join(
+                    f"[{r.get('type')}] {r.get('name')}\nTags: {r.get('tags', [])}\n{str(r.get('content', ''))[:1000]}"
+                    for r in results[:5]
+                )
+
+            elif name == "submit_artifact":
+                self._submitted_artifact = args
+                return "Artifact submitted successfully."
+
+            else:
+                return f"Unknown tool: {name}"
+
+        except Exception as e:
+            logger.error(f"Tool {name} failed: {e}")
+            return f"Error executing {name}: {str(e)[:500]}"
+
+    def _build_artifact_from_submission(self, submission: dict) -> Artifact:
+        """Build an Artifact from a submit_artifact tool call."""
+        output_type = TASK_OUTPUT_MAP.get(self.task.type, ArtifactType.DOCUMENTATION)
+
+        tags = list(submission.get("tags", []))
+        tags.append(self.task.type.value)
+        if self.task.payload.get("component"):
+            tags.append(self.task.payload["component"].lower().replace(" ", "_"))
+        tags = list(set(tags))
+
+        metadata = submission.get("metadata") or {}
+        if submission.get("file_path"):
+            metadata["file_path"] = submission["file_path"]
+
+        return Artifact(
+            project_id=self.task.project_id,
+            task_id=self.task.id,
+            agent_id=self.identity.id,
+            type=output_type,
+            name=submission.get("name", f"{self.task.type.value}_{self.task.id[:8]}"),
+            content=submission.get("content", ""),
+            tags=tags,
+            metadata=metadata,
+        )
+
+    def _serialize_assistant_message(self, message: Any) -> dict:
+        """Serialize a litellm Message object to a dict for the messages list."""
+        msg: dict[str, Any] = {"role": "assistant"}
+        if message.content:
+            msg["content"] = message.content
+        if hasattr(message, 'tool_calls') and message.tool_calls:
+            msg["tool_calls"] = [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {
+                        "name": tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in message.tool_calls
+            ]
+        return msg
+
+    # ── LLM Calls ──────────────────────────────────────────────────
+
+    async def _call_llm_with_tools(self, messages: list[dict]) -> Any:
+        """Call the LLM with tool definitions via litellm function calling."""
+        import asyncio as _asyncio
+        import os
+
+        model, api_base, api_key = self._resolve_model_params()
+        llm_timeout = 90
+
+        try:
+            call_kwargs: dict[str, Any] = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": self._max_tokens,
+                "temperature": self._model_config.temperature,
+                "api_key": api_key,
+                "timeout": llm_timeout,
+            }
+            if api_base:
+                call_kwargs["api_base"] = api_base
+
+            # Add tools if the model supports function calling
+            if self._tool_schemas and self._model_supports_tools(model):
+                call_kwargs["tools"] = self._tool_schemas
+                call_kwargs["tool_choice"] = "auto"
+
+            response = await _asyncio.wait_for(
+                litellm.acompletion(**call_kwargs),
+                timeout=llm_timeout + 10,
+            )
+            return response
+
+        except _asyncio.TimeoutError:
+            err = f"LLM call timed out after {llm_timeout}s (model={model})"
+            logger.error(f"Agent {self.identity.id}: {err}")
+            raise TimeoutError(err)
+
+    async def _call_llm_simple(self, messages: list[dict]) -> str:
+        """Simple LLM call without tools (for fallback/final output)."""
+        import asyncio as _asyncio
+
+        model, api_base, api_key = self._resolve_model_params()
+
+        call_kwargs: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "max_tokens": self._max_tokens,
+            "temperature": self._model_config.temperature,
+            "api_key": api_key,
+            "timeout": 90,
+        }
+        if api_base:
+            call_kwargs["api_base"] = api_base
+
+        response = await _asyncio.wait_for(
+            litellm.acompletion(**call_kwargs),
+            timeout=100,
+        )
+        return response.choices[0].message.content or ""
+
+    def _resolve_model_params(self) -> tuple[str, str | None, str]:
+        """Resolve the actual model string, api_base, and api_key for litellm."""
+        import os
+
+        model = self._model_config.model
+        api_base = self._model_config.api_base
+        api_key = os.getenv(self._model_config.api_key_env, "") or config.llm_api_key
+
+        # NVIDIA NIM: use openai/ prefix for litellm
+        if api_base and "nvidia" in api_base:
+            if not model.startswith("openai/"):
+                model = f"openai/{model}"
+            os.environ["OPENAI_API_KEY"] = api_key
+
+        # Set provider-specific env vars
+        if "ANTHROPIC" in self._model_config.api_key_env:
+            os.environ.setdefault("ANTHROPIC_API_KEY", api_key)
+        elif "OPENAI" in self._model_config.api_key_env:
+            os.environ.setdefault("OPENAI_API_KEY", api_key)
+
+        return model, api_base, api_key
+
+    def _model_supports_tools(self, model: str) -> bool:
+        """Check if the model supports function calling."""
+        # Most modern models support function calling via litellm
+        # NVIDIA NIM Llama 3.3 supports it via OpenAI-compat
+        no_tools = ["claude-3-haiku", "llama-2", "mistral-7b"]
+        return not any(nt in model.lower() for nt in no_tools)
+
+    # ── Prompt Building ────────────────────────────────────────────
 
     async def _build_system_prompt(
         self, env_context: dict, relevant_artifacts: list[dict]
     ) -> str:
-        """Build the system prompt with persona + context + memory."""
+        """Build the system prompt with persona + context + tool instructions."""
         from swarm.personas import get_persona_prompt
 
-        # Base persona prompt
         persona_prompt = get_persona_prompt(self.identity.role)
-
-        # Memory context
         memory_context = await self.memory.get_context_window(
             task_summary=f"{self.task.type.value}: {json.dumps(self.task.payload)}",
             env_context=env_context,
         )
+
+        # Tool instructions
+        tool_names = get_tool_names_for_task(self.task.type)
+        tool_section = ""
+        if tool_names:
+            tool_section = (
+                "\n\n# Available Tools\n"
+                f"You have access to these tools: {', '.join(tool_names)}\n\n"
+                "IMPORTANT: When your work is complete, you MUST call the `submit_artifact` tool "
+                "with your final output. This is how you deliver your work.\n\n"
+                "You can use tools iteratively — search the web, read existing artifacts, "
+                "write files, execute code to verify it works, then submit your final artifact.\n"
+            )
+
+            if "write_file" in tool_names:
+                tool_section += (
+                    "\nWhen writing code, use `write_file` to create actual project files with "
+                    "proper paths (e.g., 'src/api/routes.py', 'src/models/user.py'). "
+                    "Then include the main file content in your `submit_artifact` call.\n"
+                )
+
+            if "run_python" in tool_names:
+                tool_section += (
+                    "\nYou can use `run_python` to test your code before submitting. "
+                    "If it fails, fix the issues and try again.\n"
+                )
 
         parts = [
             persona_prompt,
@@ -214,7 +573,8 @@ class SwarmAgent:
             f"Agent ID: {self.identity.id}",
             f"Role: {self.identity.persona}",
             f"Task: {self.task.type.value}",
-            "",
+            f"Model: {self._model_config.model}",
+            tool_section,
             memory_context,
         ]
 
@@ -228,7 +588,6 @@ class SwarmAgent:
             "",
         ]
 
-        # Task payload
         payload = self.task.payload
         if payload:
             parts.append("## Task Details")
@@ -236,25 +595,24 @@ class SwarmAgent:
                 parts.append(f"- **{key}**: {val}")
             parts.append("")
 
-        # Relevant artifacts from environment
         if relevant_artifacts:
             parts.append("## Relevant Artifacts from Other Agents")
-            for art in relevant_artifacts[:10]:  # cap at 10 to control tokens
+            for art in relevant_artifacts[:10]:
                 parts.append(f"### {art['name']} ({art['type']})")
-                parts.append(f"Created by: {art.get('agent_id', 'unknown')}")
                 parts.append(f"Tags: {art.get('tags', [])}")
-                # Include content, but truncate for token budget
                 content = art.get("content", "")
                 if len(content) > 3000:
                     content = content[:3000] + "\n... [truncated]"
                 parts.append(f"```\n{content}\n```")
                 parts.append("")
 
-        # Output instructions
         output_type = TASK_OUTPUT_MAP.get(self.task.type, ArtifactType.DOCUMENTATION)
         parts.append("## Output Requirements")
         parts.append(f"Produce a **{output_type.value}** artifact.")
-        parts.append("Structure your output as follows:")
+        parts.append("Use the `submit_artifact` tool to deliver your work.")
+
+        # Fallback instructions for models without function calling
+        parts.append("\nIf you cannot use tools, structure your output as:")
         parts.append("```")
         parts.append("ARTIFACT_NAME: <descriptive name>")
         parts.append("ARTIFACT_TAGS: <comma-separated tags>")
@@ -262,133 +620,37 @@ class SwarmAgent:
         parts.append("<your full output here>")
         parts.append("```")
 
-        # Special instructions for architecture plans
         if self.task.type == TaskType.PLAN_ARCHITECTURE:
             parts.append("")
             parts.append("## CRITICAL: Architecture Decomposition")
-            parts.append("You MUST end your plan with a COMPONENTS JSON block.")
-            parts.append("This is REQUIRED — it tells the swarm which agents to spawn next.")
-            parts.append("Include at least 3-5 components. Format EXACTLY like this:")
-            parts.append("")
-            parts.append("COMPONENTS: [")
-            parts.append('  {"name": "Database Schema", "type": "design_database", "description": "Design all tables and relationships", "priority": 3},')
-            parts.append('  {"name": "REST API", "type": "create_api", "description": "Build API endpoints for all resources", "priority": 2},')
-            parts.append('  {"name": "User Interface", "type": "design_ui", "description": "Design all screens and user flows", "priority": 2},')
-            parts.append('  {"name": "Core Logic", "type": "write_code", "description": "Implement business logic and services", "priority": 2},')
-            parts.append('  {"name": "Frontend Components", "type": "build_frontend_component", "description": "Build React/UI components", "priority": 2, "dependencies": ["design_ui"]},')
-            parts.append('  {"name": "Deployment", "type": "deploy", "description": "Setup deployment and infrastructure", "priority": 1}')
-            parts.append("]")
-            parts.append("")
-            parts.append("Valid types: design_database, create_api, design_ui, write_code, build_frontend_component, write_docs, deploy, write_tests")
+            parts.append("Include a COMPONENTS array in your artifact metadata.")
+            parts.append("This tells the swarm which agents to spawn next.")
+            parts.append('Use submit_artifact with metadata: {"components": [...]}')
+            parts.append("Each component: {\"name\": \"...\", \"type\": \"design_database|create_api|design_ui|write_code|build_frontend_component|deploy|write_tests\", \"description\": \"...\", \"priority\": 1-3}")
 
-        # Special instructions for reviews
         if self.task.type == TaskType.REVIEW_CODE:
             parts.append("")
-            parts.append("## Review Special Instructions")
-            parts.append("End your review with:")
-            parts.append("REVIEW_VERDICT: PASS or FAIL")
-            parts.append("ISSUES: [list of issues, or empty]")
+            parts.append("## Review Instructions")
+            parts.append('Include in metadata: {"verdict": "PASS" or "FAIL", "has_issues": true/false, "issues": [...]}')
 
         return "\n".join(parts)
 
-    # ── LLM call ──────────────────────────────────────────────────
-
-    async def _call_llm(self, system_prompt: str, user_prompt: str) -> str:
-        """Call the LLM via litellm with explicit timeout. Supports Anthropic, NVIDIA NIM, OpenAI, etc."""
-        import asyncio as _asyncio
-        import os
-
-        # Determine the correct litellm model string and api_base
-        model = self._model
-        api_base = None
-
-        # NVIDIA NIM: litellm's nvidia_nim/ provider hangs.
-        # Use openai/ prefix with api_base instead — NVIDIA's API is OpenAI-compatible.
-        if "nvidia" in config.llm_provider.lower() or "nvidia_nim" in model.lower():
-            # Strip nvidia_nim/ prefix if present, use openai/ instead
-            clean_model = model.replace("nvidia_nim/", "")
-            model = f"openai/{clean_model}"
-            api_base = "https://integrate.api.nvidia.com/v1"
-            os.environ["OPENAI_API_KEY"] = config.llm_api_key
-            logger.info(f"Using NVIDIA NIM via OpenAI-compat: model={model} api_base={api_base}")
-        elif "anthropic" in config.llm_provider.lower():
-            os.environ.setdefault("ANTHROPIC_API_KEY", config.llm_api_key or "")
-        elif config.llm_api_key:
-            os.environ.setdefault("OPENAI_API_KEY", config.llm_api_key)
-
-        llm_timeout = 90  # seconds — hard cap on any single LLM call
-
-        try:
-            logger.info(f"Agent {self.identity.id} calling LLM model={model} timeout={llm_timeout}s")
-
-            call_kwargs = {
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "max_tokens": self._max_tokens,
-                "temperature": 0.7,
-                "api_key": config.llm_api_key,
-                "timeout": llm_timeout,
-            }
-            if api_base:
-                call_kwargs["api_base"] = api_base
-
-            response = await _asyncio.wait_for(
-                litellm.acompletion(**call_kwargs),
-                timeout=llm_timeout + 10,  # asyncio hard timeout (slightly longer)
-            )
-            content = response.choices[0].message.content
-
-            # Track token usage
-            usage = response.usage
-            if usage:
-                logger.info(
-                    f"Agent {self.identity.id} LLM usage: "
-                    f"prompt={usage.prompt_tokens} completion={usage.completion_tokens}"
-                )
-                await self.redis.publish_event({
-                    "type": "llm_usage",
-                    "agent_id": self.identity.id,
-                    "project_id": self.task.project_id,
-                    "prompt_tokens": usage.prompt_tokens,
-                    "completion_tokens": usage.completion_tokens,
-                    "total_tokens": usage.total_tokens,
-                })
-
-            return content
-
-        except _asyncio.TimeoutError:
-            err = f"LLM call timed out after {llm_timeout}s (model={self._model})"
-            logger.error(f"Agent {self.identity.id}: {err}")
-            await self._emit_progress("llm_timeout", err)
-            raise TimeoutError(err)
-
-        except Exception as e:
-            logger.error(f"LLM call failed for agent {self.identity.id}: {e}")
-            await self._emit_progress("llm_error", f"{type(e).__name__}: {str(e)[:150]}")
-            raise
-
-    # ── Output parsing ────────────────────────────────────────────
+    # ── Legacy Output Parsing (fallback for non-tool-calling models) ────
 
     def _parse_output(self, llm_response: str) -> Artifact:
-        """Parse LLM response into an Artifact."""
+        """Parse LLM response into an Artifact (legacy mode)."""
         output_type = TASK_OUTPUT_MAP.get(self.task.type, ArtifactType.DOCUMENTATION)
 
-        # Try to extract structured output
         name = self._extract_field(llm_response, "ARTIFACT_NAME") or f"{self.task.type.value}_{self.task.id[:8]}"
         tags_str = self._extract_field(llm_response, "ARTIFACT_TAGS") or ""
         tags = [t.strip() for t in tags_str.split(",") if t.strip()]
         content = self._extract_content(llm_response)
 
-        # Ensure task-relevant tags
         tags.append(self.task.type.value)
         if self.task.payload.get("component"):
             tags.append(self.task.payload["component"].lower().replace(" ", "_"))
         tags = list(set(tags))
 
-        # Build metadata
         metadata: dict[str, Any] = {}
         if self.task.type == TaskType.REVIEW_CODE:
             verdict = self._extract_field(llm_response, "REVIEW_VERDICT") or "PASS"
@@ -425,14 +687,12 @@ class SwarmAgent:
         idx = text.find(marker)
         if idx >= 0:
             content = text[idx + len(marker):]
-            # Strip leading/trailing ``` if present
             content = content.strip()
             if content.startswith("```"):
                 content = content[3:]
             if content.endswith("```"):
                 content = content[:-3]
             return content.strip()
-        # Fallback: return the whole response
         return text.strip()
 
     def _extract_components(self, text: str) -> list[dict]:
@@ -441,7 +701,6 @@ class SwarmAgent:
         if idx < 0:
             return []
         json_str = text[idx + len(marker):].strip()
-        # Find the JSON array
         start = json_str.find("[")
         if start < 0:
             return []

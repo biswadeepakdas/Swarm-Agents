@@ -358,7 +358,53 @@ async def get_graph(project_id: str):
 
 @router.get("/health")
 async def health():
-    return {"status": "ok", "engine": "swarm-agents", "version": "0.1.0"}
+    return {"status": "ok", "engine": "swarm-agents", "version": "0.2.0"}
+
+
+# ── Project Download ─────────────────────────────────────────
+
+@router.get("/projects/{project_id}/download")
+async def download_project(project_id: str):
+    """Download all project artifacts as a ZIP file."""
+    from fastapi.responses import Response
+    from swarm.core.project_assembler import create_zip
+
+    try:
+        zip_bytes = await create_zip(_db, project_id)
+        project = await _db.get_project(project_id)
+        name = project.get("name", "project").replace(" ", "_").lower() if project else "project"
+        return Response(
+            content=zip_bytes,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{name}_deliverables.zip"'},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/projects/{project_id}/files")
+async def list_project_files(project_id: str):
+    """List all files in the assembled project structure."""
+    from swarm.core.project_assembler import assemble_project
+
+    try:
+        result = await assemble_project(_db, project_id)
+        return {
+            "manifest": result["manifest"],
+            "files": [
+                {"path": f["path"], "type": f["type"], "name": f["artifact_name"], "size": len(f["content"])}
+                for f in result["files"]
+            ],
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/models")
+async def list_models():
+    """List available LLM models and routing table."""
+    from swarm.core.model_router import get_router
+    return get_router().get_model_info()
 
 
 # ── Helpers ───────────────────────────────────────────────────

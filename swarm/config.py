@@ -36,6 +36,28 @@ class SwarmConfig:
         default_factory=lambda: float(os.getenv("LLM_MAX_BUDGET_PER_PROJECT", "5.00"))
     )
 
+    # Multi-model API keys (set any to enable that provider)
+    anthropic_api_key: str = field(
+        default_factory=lambda: os.getenv("ANTHROPIC_API_KEY", "")
+    )
+    openai_api_key: str = field(
+        default_factory=lambda: os.getenv("OPENAI_API_KEY", "")
+    )
+    deepseek_api_key: str = field(
+        default_factory=lambda: os.getenv("DEEPSEEK_API_KEY", "")
+    )
+    nvidia_api_key: str = field(
+        default_factory=lambda: os.getenv("NVIDIA_API_KEY", "")
+    )
+    gemini_api_key: str = field(
+        default_factory=lambda: os.getenv("GEMINI_API_KEY", "")
+    )
+
+    # Agent tool loop
+    agent_max_tool_steps: int = field(
+        default_factory=lambda: int(os.getenv("AGENT_MAX_TOOL_STEPS", "8"))
+    )
+
     # Embeddings
     embedding_model: str = field(
         default_factory=lambda: os.getenv("EMBEDDING_MODEL", "all-MiniLM-L6-v2")

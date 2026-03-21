@@ -722,39 +722,39 @@ document.getElementById('btnCopyArtifact')?.addEventListener('click', () => {
   });
 });
 
-// Download ALL artifacts as a single concatenated file
-document.getElementById('btnDownloadAll')?.addEventListener('click', () => {
-  if (state.artifacts.length === 0) return;
-  const projectName = state.projects.find(p => p.id === state.activeProjectId)?.name || 'project';
-  const safeName = projectName.replace(/[^a-zA-Z0-9_\-. ]/g, '_').replace(/\s+/g, '_');
+// Download ALL as ZIP (hits backend API which assembles a proper project structure)
+document.getElementById('btnDownloadAll')?.addEventListener('click', async () => {
+  if (!state.activeProjectId) return;
+  const btn = document.getElementById('btnDownloadAll');
+  const orig = btn.textContent;
+  btn.textContent = 'Downloading...';
+  btn.disabled = true;
 
-  let combined = `# ${projectName} — Swarm Deliverables\n`;
-  combined += `# Generated: ${new Date().toISOString()}\n`;
-  combined += `# Total artifacts: ${state.artifacts.length}\n\n`;
-
-  // Group by type
-  const groups = {};
-  state.artifacts.forEach(a => {
-    const t = a.type || 'unknown';
-    if (!groups[t]) groups[t] = [];
-    groups[t].push(a);
-  });
-
-  for (const [type, arts] of Object.entries(groups)) {
-    combined += `${'═'.repeat(70)}\n`;
-    combined += `  ${type.replace(/_/g, ' ').toUpperCase()} (${arts.length} files)\n`;
-    combined += `${'═'.repeat(70)}\n\n`;
-
-    for (const art of arts) {
-      combined += `${'─'.repeat(50)}\n`;
-      combined += `  ${art.name}\n`;
-      combined += `  Tags: ${(art.tags || []).join(', ')}\n`;
-      combined += `${'─'.repeat(50)}\n\n`;
-      combined += (art.content || '(empty)') + '\n\n\n';
-    }
+  try {
+    const resp = await fetch(`${API_BASE}/projects/${state.activeProjectId}/download`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const projectName = state.projects.find(p => p.id === state.activeProjectId)?.name || 'project';
+    a.download = `${projectName.replace(/\s+/g, '_').toLowerCase()}_deliverables.zip`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    console.error('Download failed:', e);
+    // Fallback: download as text bundle
+    if (state.artifacts.length === 0) return;
+    const projectName = state.projects.find(p => p.id === state.activeProjectId)?.name || 'project';
+    let combined = `# ${projectName} — Swarm Deliverables\n# Generated: ${new Date().toISOString()}\n\n`;
+    state.artifacts.forEach(art => {
+      combined += `${'═'.repeat(60)}\n  [${art.type}] ${art.name}\n${'═'.repeat(60)}\n\n${art.content || '(empty)'}\n\n\n`;
+    });
+    downloadText(`${projectName.replace(/\s+/g, '_')}_deliverables.txt`, combined);
+  } finally {
+    btn.textContent = orig;
+    btn.disabled = false;
   }
-
-  downloadText(`${safeName}_deliverables.txt`, combined);
 });
 
 dom.btnCloseDetail.addEventListener('click', () => {
