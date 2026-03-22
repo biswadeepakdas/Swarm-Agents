@@ -2,7 +2,7 @@
 Multi-Model Council — runs the same prompt through multiple LLMs and synthesizes.
 
 Used for high-impact decisions: architecture, security, financial trade-offs.
-Draft → Compare → Decide pipeline per the Perplexity Computer spec.
+Draft → Compare → Decide pipeline per the Hive Computer spec.
 """
 
 from __future__ import annotations

@@ -4,7 +4,7 @@ The Swarm Agent — an autonomous, tool-using entity.
 Lifecycle: born → load context → tool loop (think→act→observe) → publish → die.
 Each agent gets its own identity, memory, persona, tools, and LLM backbone.
 
-This is the Perplexity Computer-style agent: iterative tool use, multi-model
+This is the Hive Computer-style agent: iterative tool use, multi-model
 routing, code execution, web search, and structured file output.
 """
 
@@ -52,7 +52,7 @@ TASK_OUTPUT_MAP: dict[TaskType, ArtifactType] = {
     TaskType.FIX_CODE: ArtifactType.CODE_FILE,
     TaskType.INTEGRATION_TEST: ArtifactType.TEST_SUITE,
     TaskType.RESOLVE_CONFLICT: ArtifactType.DECISION,
-    # New: Perplexity Computer spec
+    # New: Hive Computer spec
     TaskType.EVALUATE_PROJECT: ArtifactType.EVALUATION_REPORT,
     TaskType.ASSEMBLE_DELIVERABLES: ArtifactType.DELIVERABLES_PACKAGE,
     TaskType.GENERATE_MEDIA: ArtifactType.MEDIA_ASSET,

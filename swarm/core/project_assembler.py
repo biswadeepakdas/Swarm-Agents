@@ -3,7 +3,7 @@ Project Assembler — packages all artifacts into a downloadable project.
 
 Takes all artifacts from a completed project and assembles them into
 a structured file tree with proper paths, then creates a ZIP archive.
-Like Perplexity Computer's "deliver finished artifacts."
+Like Hive Computer's "deliver finished artifacts."
 """
 
 from __future__ import annotations

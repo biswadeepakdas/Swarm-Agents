@@ -1,7 +1,7 @@
 """
 Multi-Model Router — routes each task type to the best-suited LLM.
 
-Like Perplexity Computer's 19-model orchestration but practical:
+Like Hive Computer's 19-model orchestration but practical:
 uses litellm to support any provider, with static routing + fallbacks.
 """
 
@@ -237,7 +237,7 @@ TASK_ROUTING: dict[TaskType, list[str]] = {
         "nvidia-llama", "nvidia-deepseek-v3",
     ],
 
-    # ── New: Perplexity Computer spec tasks ────────────────────────
+    # ── New: Hive Computer spec tasks ────────────────────────
     TaskType.EVALUATE_PROJECT: [
         "claude-sonnet", "gpt-4o",
         "nvidia-deepseek-v3", "nvidia-llama",

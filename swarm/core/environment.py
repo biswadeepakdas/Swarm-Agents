@@ -68,7 +68,7 @@ REACTIVE_TRIGGERS: dict[ArtifactType, list[dict[str, Any]]] = {
     ArtifactType.DECISION: [],       # terminal
     ArtifactType.BUG_REPORT: [],     # terminal
     ArtifactType.API_SPEC: [],       # terminal
-    # New: Perplexity Computer spec
+    # New: Hive Computer spec
     ArtifactType.PROJECT_SUMMARY: [],        # terminal
     ArtifactType.MEDIA_ASSET: [],            # terminal
     ArtifactType.EVALUATION_REPORT: [],      # terminal

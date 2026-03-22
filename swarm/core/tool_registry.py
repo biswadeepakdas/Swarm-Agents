@@ -7,7 +7,7 @@ Each tool has:
 - Per-task-type availability
 
 This is what transforms agents from one-shot prompt→artifact converters
-into iterative tool-using agents (like Perplexity Computer).
+into iterative tool-using agents (like Hive Computer).
 """
 
 from __future__ import annotations
@@ -321,7 +321,7 @@ TASK_TOOL_MAP: dict[TaskType, list[str]] = {
     TaskType.WRITE_DOCS: ["web_search", "fetch_page", "query_artifacts", "write_file", "submit_artifact"],
     TaskType.RESOLVE_CONFLICT: ["ask_user", "query_artifacts", "submit_artifact"],
 
-    # New: Perplexity Computer spec
+    # New: Hive Computer spec
     TaskType.EVALUATE_PROJECT: ["query_artifacts", "run_python", "council_deliberate", "submit_artifact"],
     TaskType.ASSEMBLE_DELIVERABLES: ["query_artifacts", "read_file", "list_files", "write_file", "submit_artifact"],
     TaskType.GENERATE_MEDIA: ["generate_image", "web_search", "query_artifacts", "submit_artifact"],

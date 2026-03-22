@@ -36,7 +36,7 @@ class ArtifactType(StrEnum):
     DEPLOYMENT_CONFIG = "deployment_config"
     REQUIREMENTS_DOC = "requirements_doc"
     FRONTEND_COMPONENT = "frontend_component"
-    # New: Perplexity Computer spec
+    # New: Hive Computer spec
     PROJECT_SUMMARY = "project_summary"
     MEDIA_ASSET = "media_asset"
     EVALUATION_REPORT = "evaluation_report"
