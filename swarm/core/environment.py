@@ -259,6 +259,14 @@ class Environment:
         # Special: review with issues → spawn fix task (only if depth allows)
         if artifact.type == ArtifactType.REVIEW and depth < MAX_TRIGGER_DEPTH:
             metadata = artifact.metadata or {}
+            if isinstance(metadata, str):
+                try:
+                    import json
+                    metadata = json.loads(metadata)
+                except (json.JSONDecodeError, TypeError):
+                    metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
             if metadata.get("has_issues", False):
                 fix_task = Task(
                     type=TaskType.FIX_CODE,
@@ -279,6 +287,15 @@ class Environment:
         # Special: architecture plan → decompose into build tasks
         if artifact.type == ArtifactType.ARCHITECTURE_PLAN:
             metadata = artifact.metadata or {}
+            # Handle metadata stored as JSON string
+            if isinstance(metadata, str):
+                try:
+                    import json
+                    metadata = json.loads(metadata)
+                except (json.JSONDecodeError, TypeError):
+                    metadata = {}
+            if not isinstance(metadata, dict):
+                metadata = {}
             components = metadata.get("components", [])
 
             # ── FALLBACK: If LLM didn't produce parseable components,
