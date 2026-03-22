@@ -193,6 +193,8 @@ async function loadProjects() {
 
 function selectProject(projectId) {
   state.activeProjectId = projectId;
+  _wsConnectedOnce = false;
+  _wsReconnectDelay = 3000;
 
   // Highlight in sidebar
   $$('.project-card').forEach(c => c.classList.remove('active'));
@@ -334,6 +336,9 @@ function renderSwarmProgress() {
 
 // ── WebSocket ────────────────────────────────────────────────
 
+let _wsConnectedOnce = false;
+let _wsReconnectDelay = 3000;
+
 function connectWebSocket(projectId) {
   if (state.ws) {
     state.ws.close();
@@ -345,18 +350,23 @@ function connectWebSocket(projectId) {
   ws.onopen = () => {
     dom.connectionStatus.textContent = 'LIVE';
     dom.connectionStatus.classList.add('connected');
-    addFeedItem('complete', 'Connected to swarm feed.');
+    _wsReconnectDelay = 3000;
+    if (!_wsConnectedOnce) {
+      addFeedItem('complete', 'Connected to swarm feed.');
+      _wsConnectedOnce = true;
+    }
   };
 
   ws.onclose = () => {
     dom.connectionStatus.textContent = 'DISCONNECTED';
     dom.connectionStatus.classList.remove('connected');
-    // Auto-reconnect after 3s
+    // Auto-reconnect with exponential backoff (max 60s)
     setTimeout(() => {
       if (state.activeProjectId === projectId) {
         connectWebSocket(projectId);
       }
-    }, 3000);
+    }, _wsReconnectDelay);
+    _wsReconnectDelay = Math.min(_wsReconnectDelay * 2, 60000);
   };
 
   ws.onerror = () => {
