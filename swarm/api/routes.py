@@ -358,7 +358,7 @@ async def get_graph(project_id: str):
 
 @router.get("/health")
 async def health():
-    return {"status": "ok", "engine": "swarm-agents", "version": "0.3.0"}
+    return {"status": "ok", "engine": "swarm-agents", "version": "0.4.0"}
 
 
 # ── Agent-User Interactions ──────────────────────────────────
@@ -521,6 +521,283 @@ async def list_models():
     """List available LLM models and routing table."""
     from swarm.core.model_router import get_router
     return get_router().get_model_info()
+
+
+# ── Council Deliberation ──────────────────────────────────────
+
+class CouncilRequest(BaseModel):
+    question: str = Field(..., min_length=5, max_length=5000)
+    context: str = Field(default="", max_length=10000)
+    max_models: int = Field(default=3, ge=2, le=5)
+
+
+@router.post("/council/deliberate")
+async def council_deliberate(req: CouncilRequest):
+    """Run a multi-model council deliberation."""
+    from swarm.core.council import get_council
+
+    council = get_council()
+    result = await council.deliberate(
+        question=req.question,
+        context=req.context,
+        max_models=req.max_models,
+    )
+
+    # Store in DB
+    session = await _db.create_council_session({
+        "question": req.question,
+        "context": req.context,
+        "votes": [{"model": v.model, "content": v.content[:2000], "latency_ms": v.latency_ms, "error": v.error} for v in result.votes],
+        "synthesis": result.synthesis,
+        "agreement_score": result.agreement_score,
+        "chosen_approach": result.chosen_approach,
+        "reasoning": result.reasoning,
+        "total_latency_ms": result.total_latency_ms,
+    })
+
+    return {
+        "session_id": str(session["id"]),
+        "agreement_score": result.agreement_score,
+        "synthesis": result.synthesis,
+        "chosen_approach": result.chosen_approach,
+        "reasoning": result.reasoning,
+        "votes": [
+            {"model": v.model, "content": v.content[:1000], "latency_ms": v.latency_ms, "error": v.error}
+            for v in result.votes
+        ],
+        "total_latency_ms": result.total_latency_ms,
+    }
+
+
+@router.post("/projects/{project_id}/council")
+async def project_council(project_id: str, req: CouncilRequest):
+    """Run council deliberation in context of a project."""
+    project = await _db.get_project(project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+
+    # Add project context
+    state = await _environment.get_project_state(project_id)
+    full_context = f"Project: {project.get('name', '')}\nBrief: {project.get('brief', '')[:500]}\n"
+    full_context += f"Artifacts: {state.get('artifact_summary', {})}\n"
+    full_context += f"\n{req.context}"
+
+    from swarm.core.council import get_council
+    council = get_council()
+    result = await council.deliberate(
+        question=req.question,
+        context=full_context,
+        max_models=req.max_models,
+    )
+
+    await _db.create_council_session({
+        "project_id": project_id,
+        "question": req.question,
+        "context": full_context[:5000],
+        "votes": [{"model": v.model, "content": v.content[:2000], "latency_ms": v.latency_ms} for v in result.votes],
+        "synthesis": result.synthesis,
+        "agreement_score": result.agreement_score,
+        "chosen_approach": result.chosen_approach,
+        "reasoning": result.reasoning,
+        "total_latency_ms": result.total_latency_ms,
+    })
+
+    return {
+        "synthesis": result.synthesis,
+        "agreement_score": result.agreement_score,
+        "chosen_approach": result.chosen_approach,
+        "votes": [{"model": v.model, "latency_ms": v.latency_ms} for v in result.votes],
+    }
+
+
+@router.get("/projects/{project_id}/council")
+async def get_council_sessions(project_id: str):
+    """Get council deliberation history for a project."""
+    sessions = await _db.get_council_sessions(project_id)
+    return {"sessions": [_serialize_record(s) for s in sessions]}
+
+
+# ── Scheduled Tasks ───────────────────────────────────────────
+
+class CreateScheduleRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+    description: str = Field(default="", max_length=2000)
+    trigger_type: str = Field(default="cron")  # cron, once
+    cron_expression: str = Field(default="")
+    workflow: dict = Field(default_factory=dict)
+    project_id: str | None = None
+    max_runs: int | None = None
+    next_run_at: str | None = None
+
+
+@router.get("/schedules")
+async def list_schedules(status: str | None = None):
+    """List all scheduled tasks."""
+    schedules = await _db.get_scheduled_tasks(status=status)
+    return {"schedules": [_serialize_record(s) for s in schedules]}
+
+
+@router.post("/schedules")
+async def create_schedule(req: CreateScheduleRequest):
+    """Create a new scheduled task."""
+    from datetime import datetime
+
+    sched_data: dict[str, Any] = {
+        "name": req.name,
+        "description": req.description,
+        "trigger_type": req.trigger_type,
+        "cron_expression": req.cron_expression,
+        "workflow": req.workflow,
+        "project_id": req.project_id,
+        "max_runs": req.max_runs,
+    }
+
+    if req.next_run_at:
+        try:
+            sched_data["next_run_at"] = datetime.fromisoformat(req.next_run_at)
+        except ValueError:
+            pass
+
+    result = await _db.create_scheduled_task(sched_data)
+    return {"schedule": _serialize_record(result)}
+
+
+@router.delete("/schedules/{schedule_id}")
+async def delete_schedule(schedule_id: str):
+    """Delete a scheduled task."""
+    await _db.delete_scheduled_task(schedule_id)
+    return {"message": "Schedule deleted", "id": schedule_id}
+
+
+@router.post("/schedules/{schedule_id}/pause")
+async def pause_schedule(schedule_id: str):
+    """Pause a scheduled task."""
+    await _db.update_scheduled_task(schedule_id, status="paused")
+    return {"message": "Schedule paused"}
+
+
+@router.post("/schedules/{schedule_id}/resume")
+async def resume_schedule(schedule_id: str):
+    """Resume a paused scheduled task."""
+    await _db.update_scheduled_task(schedule_id, status="active")
+    return {"message": "Schedule resumed"}
+
+
+# ── Skills / Templates ────────────────────────────────────────
+
+class InstantiateSkillRequest(BaseModel):
+    inputs: dict[str, str] = Field(default_factory=dict)
+    name: str = Field(default="")
+
+
+@router.get("/skills")
+async def list_skills(category: str | None = None):
+    """List all available skills (built-in + user-created)."""
+    from swarm.core.skills import SkillRegistry
+    registry = SkillRegistry(_db)
+    skills = await registry.list_skills(category=category)
+    return {"skills": skills}
+
+
+@router.get("/skills/{skill_id}")
+async def get_skill(skill_id: str):
+    """Get a single skill definition."""
+    from swarm.core.skills import SkillRegistry
+    registry = SkillRegistry(_db)
+    skill = await registry.get_skill(skill_id)
+    if not skill:
+        raise HTTPException(404, "Skill not found")
+    return skill
+
+
+@router.post("/skills/{skill_id}/run")
+async def run_skill(skill_id: str, req: InstantiateSkillRequest):
+    """Instantiate a skill — creates a new project from a skill template."""
+    from swarm.core.skills import SkillRegistry
+    registry = SkillRegistry(_db)
+
+    inputs = dict(req.inputs)
+    if req.name:
+        inputs["name"] = req.name
+
+    result = await registry.instantiate_skill(skill_id, inputs, _task_queue)
+
+    # Track usage
+    try:
+        await _db.increment_skill_usage(skill_id)
+    except Exception:
+        pass
+
+    return result
+
+
+@router.post("/projects/{project_id}/save-as-skill")
+async def save_project_as_skill(project_id: str):
+    """Save a completed project as a reusable skill template."""
+    from swarm.core.skills import SkillRegistry
+    registry = SkillRegistry(_db)
+    skill = await registry.create_skill_from_project(project_id)
+    return {"skill": skill}
+
+
+# ── Project Archive ───────────────────────────────────────────
+
+@router.post("/projects/{project_id}/archive")
+async def archive_project(project_id: str):
+    """Archive a completed project."""
+    project = await _db.get_project(project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+
+    await _db.update_project(project_id, archived=True)
+    return {"message": "Project archived", "id": project_id}
+
+
+@router.post("/projects/{project_id}/unarchive")
+async def unarchive_project(project_id: str):
+    """Unarchive a project."""
+    await _db.update_project(project_id, archived=False)
+    return {"message": "Project unarchived", "id": project_id}
+
+
+@router.get("/projects/{project_id}/summary")
+async def get_project_summary(project_id: str):
+    """Get the project completion summary."""
+    project = await _db.get_project(project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+
+    state = await _environment.get_project_state(project_id)
+    artifacts = await _db.query_artifacts(project_id)
+
+    return {
+        "project": _serialize_project(project),
+        "summary": project.get("summary", ""),
+        "status": project.get("status", "active"),
+        "completed_at": str(project.get("completed_at", "")) if project.get("completed_at") else None,
+        "artifact_summary": state.get("artifact_summary", {}),
+        "artifact_count": len(artifacts),
+        "task_counts": state.get("task_counts", {}),
+        "total_agents": state.get("total_agents", 0),
+        "next_actions": _suggest_next_actions(project, artifacts),
+    }
+
+
+def _suggest_next_actions(project: dict, artifacts: list) -> list[dict]:
+    """Suggest next actions after project completion."""
+    actions = []
+    if project.get("status") == "completed":
+        actions.append({"id": "download", "label": "Download Deliverables", "icon": "download"})
+        actions.append({"id": "save_skill", "label": "Save as Template", "icon": "bookmark"})
+        actions.append({"id": "archive", "label": "Archive Project", "icon": "archive"})
+        actions.append({"id": "duplicate", "label": "Start Similar Project", "icon": "copy"})
+
+        # Check if GitHub push is available
+        import os
+        if os.getenv("GITHUB_TOKEN"):
+            actions.append({"id": "github_push", "label": "Push to GitHub", "icon": "github"})
+
+    return actions
 
 
 # ── Helpers ───────────────────────────────────────────────────

@@ -236,6 +236,24 @@ TASK_ROUTING: dict[TaskType, list[str]] = {
         "claude-sonnet", "gpt-4o",
         "nvidia-llama", "nvidia-deepseek-v3",
     ],
+
+    # ── New: Perplexity Computer spec tasks ────────────────────────
+    TaskType.EVALUATE_PROJECT: [
+        "claude-sonnet", "gpt-4o",
+        "nvidia-deepseek-v3", "nvidia-llama",
+    ],
+    TaskType.ASSEMBLE_DELIVERABLES: [
+        "gpt-4o-mini", "claude-haiku",
+        "nvidia-llama", "nvidia-llama-3b",
+    ],
+    TaskType.GENERATE_MEDIA: [
+        "claude-sonnet", "gpt-4o",
+        "nvidia-llama", "nvidia-devstral",
+    ],
+    TaskType.COUNCIL_REVIEW: [
+        "claude-sonnet", "gpt-4o",
+        "nvidia-deepseek-v3", "nvidia-llama",
+    ],
 }
 
 

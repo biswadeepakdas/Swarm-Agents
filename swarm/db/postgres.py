@@ -380,3 +380,144 @@ class PostgresDB:
                 k,
             )
             return [dict(r) for r in rows]
+
+    # ── Scheduled Task CRUD ────────────────────────────────────────
+
+    async def create_scheduled_task(self, task: dict[str, Any]) -> dict[str, Any]:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO scheduled_tasks (id, name, description, project_id, trigger_type,
+                    cron_expression, workflow, status, next_run_at, max_runs)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                RETURNING *
+                """,
+                task.get("id") or str(__import__("uuid").uuid4()),
+                task["name"],
+                task.get("description", ""),
+                task.get("project_id"),
+                task.get("trigger_type", "cron"),
+                task.get("cron_expression", ""),
+                json.dumps(task.get("workflow", {})),
+                task.get("status", "active"),
+                task.get("next_run_at"),
+                task.get("max_runs"),
+            )
+            return dict(row)
+
+    async def get_scheduled_tasks(self, status: str | None = None) -> list[dict]:
+        async with self.pool.acquire() as conn:
+            if status:
+                rows = await conn.fetch(
+                    "SELECT * FROM scheduled_tasks WHERE status = $1 ORDER BY created_at DESC",
+                    status,
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT * FROM scheduled_tasks ORDER BY created_at DESC"
+                )
+            return [dict(r) for r in rows]
+
+    async def get_scheduled_task(self, task_id: str) -> dict[str, Any] | None:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM scheduled_tasks WHERE id = $1", task_id)
+            return dict(row) if row else None
+
+    async def update_scheduled_task(self, task_id: str, **kwargs: Any) -> None:
+        sets = []
+        vals = []
+        idx = 1
+        for key, val in kwargs.items():
+            if key == "workflow" and isinstance(val, dict):
+                val = json.dumps(val)
+            sets.append(f"{key} = ${idx}")
+            vals.append(val)
+            idx += 1
+        vals.append(task_id)
+        sql = f"UPDATE scheduled_tasks SET {', '.join(sets)} WHERE id::text = ${idx}"
+        async with self.pool.acquire() as conn:
+            await conn.execute(sql, *vals)
+
+    async def delete_scheduled_task(self, task_id: str) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute("DELETE FROM scheduled_tasks WHERE id::text = $1", task_id)
+
+    # ── Skill CRUD ─────────────────────────────────────────────────
+
+    async def create_skill(self, skill: dict[str, Any]) -> dict[str, Any]:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO skills (id, name, description, category, workflow, input_fields,
+                    source_project_id, builtin)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (id) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    workflow = EXCLUDED.workflow,
+                    input_fields = EXCLUDED.input_fields
+                RETURNING *
+                """,
+                skill["id"],
+                skill["name"],
+                skill.get("description", ""),
+                skill.get("category", "custom"),
+                json.dumps(skill.get("workflow", {})),
+                json.dumps(skill.get("input_fields", [])),
+                skill.get("source_project_id"),
+                skill.get("builtin", False),
+            )
+            return dict(row)
+
+    async def get_skills(self, category: str | None = None) -> list[dict]:
+        async with self.pool.acquire() as conn:
+            if category:
+                rows = await conn.fetch(
+                    "SELECT * FROM skills WHERE category = $1 ORDER BY usage_count DESC",
+                    category,
+                )
+            else:
+                rows = await conn.fetch("SELECT * FROM skills ORDER BY usage_count DESC")
+            return [dict(r) for r in rows]
+
+    async def get_skill(self, skill_id: str) -> dict[str, Any] | None:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM skills WHERE id = $1", skill_id)
+            return dict(row) if row else None
+
+    async def increment_skill_usage(self, skill_id: str) -> None:
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE skills SET usage_count = usage_count + 1 WHERE id = $1",
+                skill_id,
+            )
+
+    # ── Council Session CRUD ──────────────────────────────────────
+
+    async def create_council_session(self, session: dict[str, Any]) -> dict[str, Any]:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO council_sessions (project_id, question, context, votes,
+                    synthesis, agreement_score, chosen_approach, reasoning, total_latency_ms)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                RETURNING *
+                """,
+                session.get("project_id"),
+                session["question"],
+                session.get("context", ""),
+                json.dumps(session.get("votes", [])),
+                session.get("synthesis", ""),
+                session.get("agreement_score", 0),
+                session.get("chosen_approach", ""),
+                session.get("reasoning", ""),
+                session.get("total_latency_ms", 0),
+            )
+            return dict(row)
+
+    async def get_council_sessions(self, project_id: str) -> list[dict]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM council_sessions WHERE project_id = $1 ORDER BY created_at DESC",
+                project_id,
+            )
+            return [dict(r) for r in rows]

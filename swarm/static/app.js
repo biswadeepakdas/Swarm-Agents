@@ -1595,3 +1595,447 @@ window.addEventListener('resize', () => {
     if (graphTab && graphTab.classList.contains('active') && _graphData.nodes.length > 0) renderGraph();
   }, 300);
 });
+
+
+// ══════════════════════════════════════════════════════════════
+//  COUNCIL DELIBERATION
+// ══════════════════════════════════════════════════════════════
+
+document.getElementById('btnRunCouncil')?.addEventListener('click', async () => {
+  const question = document.getElementById('councilQuestion')?.value?.trim();
+  const context = document.getElementById('councilContext')?.value?.trim() || '';
+  const maxModels = parseInt(document.getElementById('councilModels')?.value || '3');
+
+  if (!question || question.length < 5) {
+    showToast('Question must be at least 5 characters.', 'warn');
+    return;
+  }
+
+  const btn = document.getElementById('btnRunCouncil');
+  btn.disabled = true;
+  btn.textContent = 'Deliberating...';
+  document.getElementById('councilResults').innerHTML = '<div class="council-loading"><div class="spinner"></div>Running council across multiple models...</div>';
+
+  try {
+    const endpoint = state.activeProjectId
+      ? `${API_BASE}/projects/${state.activeProjectId}/council`
+      : `${API_BASE}/council/deliberate`;
+
+    const res = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question, context, max_models: maxModels }),
+    });
+    const data = await res.json();
+
+    if (res.ok) {
+      renderCouncilResult(data);
+      showToast('Council deliberation complete.', 'ok');
+    } else {
+      document.getElementById('councilResults').innerHTML = `<div class="empty-state">Error: ${data.detail || 'Unknown error'}</div>`;
+    }
+  } catch (err) {
+    document.getElementById('councilResults').innerHTML = `<div class="empty-state">Network error: ${err.message}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Deliberate';
+  }
+});
+
+function renderCouncilResult(data) {
+  const container = document.getElementById('councilResults');
+  if (!container) return;
+
+  const agreePct = Math.round((data.agreement_score || 0) * 100);
+  const agreeColor = agreePct > 70 ? 'var(--green)' : agreePct > 40 ? 'var(--amber)' : 'var(--red)';
+
+  let votesHtml = '';
+  (data.votes || []).forEach(v => {
+    const statusBadge = v.error
+      ? `<span class="vote-badge vote-error">FAILED</span>`
+      : `<span class="vote-badge vote-ok">${v.latency_ms}ms</span>`;
+    votesHtml += `
+      <div class="council-vote">
+        <div class="vote-header">
+          <span class="vote-model">${escapeHtml(v.model)}</span>
+          ${statusBadge}
+        </div>
+        <div class="vote-content">${escapeHtml(v.content || v.error || '').slice(0, 600)}</div>
+      </div>`;
+  });
+
+  container.innerHTML = `
+    <div class="council-synthesis">
+      <div class="synthesis-header">
+        <span class="synthesis-label">SYNTHESIS</span>
+        <span class="agreement-badge" style="border-color:${agreeColor};color:${agreeColor}">
+          ${agreePct}% Agreement
+        </span>
+      </div>
+      <div class="synthesis-content">${escapeHtml(data.synthesis || '')}</div>
+      ${data.chosen_approach ? `<div class="synthesis-chosen"><strong>Chosen:</strong> ${escapeHtml(data.chosen_approach)}</div>` : ''}
+      ${data.reasoning ? `<div class="synthesis-reasoning">${escapeHtml(data.reasoning)}</div>` : ''}
+    </div>
+    <div class="council-votes-header">Individual Votes (${data.total_latency_ms || 0}ms total)</div>
+    <div class="council-votes">${votesHtml}</div>
+  `;
+}
+
+
+// ══════════════════════════════════════════════════════════════
+//  SKILLS / TEMPLATES
+// ══════════════════════════════════════════════════════════════
+
+let _allSkills = [];
+
+async function loadSkills() {
+  try {
+    const res = await fetch(`${API_BASE}/skills`);
+    if (res.ok) {
+      const data = await res.json();
+      _allSkills = data.skills || [];
+      renderSkills(_allSkills);
+    }
+  } catch (err) {
+    console.warn('Failed to load skills:', err);
+  }
+}
+
+function renderSkills(skills) {
+  const grid = document.getElementById('skillsGrid');
+  if (!grid) return;
+
+  if (!skills.length) {
+    grid.innerHTML = '<div class="empty-state">No skills available.</div>';
+    return;
+  }
+
+  const catIcons = { build: '🔨', research: '🔍', quality: '✅', monitoring: '📊', custom: '⚡' };
+
+  grid.innerHTML = skills.map(s => `
+    <div class="skill-card" data-skill-id="${escapeHtml(s.id)}">
+      <div class="skill-icon">${catIcons[s.category] || '⚡'}</div>
+      <div class="skill-info">
+        <div class="skill-name">${escapeHtml(s.name)}</div>
+        <div class="skill-desc">${escapeHtml(s.description || '').slice(0, 100)}</div>
+        <div class="skill-meta">
+          <span class="skill-cat">${escapeHtml(s.category || 'custom')}</span>
+          ${s.builtin ? '<span class="skill-builtin">Built-in</span>' : ''}
+        </div>
+      </div>
+      <button class="btn btn-primary btn-sm skill-run-btn" data-skill-id="${escapeHtml(s.id)}">Run</button>
+    </div>
+  `).join('');
+
+  // Attach run handlers
+  grid.querySelectorAll('.skill-run-btn').forEach(btn => {
+    btn.addEventListener('click', () => runSkill(btn.dataset.skillId));
+  });
+}
+
+async function runSkill(skillId) {
+  const skill = _allSkills.find(s => s.id === skillId);
+  if (!skill) return;
+
+  // Simple prompt for inputs
+  const inputs = {};
+  const fields = skill.input_fields || [];
+  for (const f of fields) {
+    const val = prompt(`${f.label}${f.required ? ' (required)' : ''}:`);
+    if (f.required && (!val || !val.trim())) {
+      showToast(`${f.label} is required.`, 'warn');
+      return;
+    }
+    if (val) inputs[f.name] = val.trim();
+  }
+
+  if (!inputs.name) {
+    inputs.name = prompt('Project name:') || skill.name;
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/skills/${skillId}/run`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ inputs, name: inputs.name }),
+    });
+    const data = await res.json();
+    if (res.ok) {
+      showToast(`Skill launched: ${data.tasks_created} tasks created.`, 'ok');
+      await loadProjects();
+      if (data.project_id) selectProject(data.project_id);
+    } else {
+      showToast(`Skill failed: ${data.detail || 'Unknown error'}`, 'error');
+    }
+  } catch (err) {
+    showToast(`Network error: ${err.message}`, 'error');
+  }
+}
+
+// Skill filter buttons
+document.querySelectorAll('.skill-filter').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.skill-filter').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    const cat = btn.dataset.cat;
+    if (cat === 'all') {
+      renderSkills(_allSkills);
+    } else {
+      renderSkills(_allSkills.filter(s => s.category === cat));
+    }
+  });
+});
+
+// Load skills when skills tab is clicked
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    if (tab.dataset.tab === 'skills' && _allSkills.length === 0) loadSkills();
+    if (tab.dataset.tab === 'schedules') loadSchedules();
+  });
+});
+
+// Also load skills on page load
+setTimeout(loadSkills, 2000);
+
+
+// ══════════════════════════════════════════════════════════════
+//  SCHEDULES
+// ══════════════════════════════════════════════════════════════
+
+async function loadSchedules() {
+  try {
+    const res = await fetch(`${API_BASE}/schedules`);
+    if (res.ok) {
+      const data = await res.json();
+      renderSchedules(data.schedules || []);
+    }
+  } catch (err) {
+    console.warn('Failed to load schedules:', err);
+  }
+}
+
+function renderSchedules(schedules) {
+  const list = document.getElementById('schedulesList');
+  if (!list) return;
+
+  if (!schedules.length) {
+    list.innerHTML = '<div class="empty-state">No scheduled tasks. Create one to run workflows on a timer.</div>';
+    return;
+  }
+
+  list.innerHTML = schedules.map(s => {
+    const statusColor = s.status === 'active' ? 'var(--green)' : s.status === 'paused' ? 'var(--amber)' : 'var(--text-muted)';
+    return `
+      <div class="schedule-card" data-id="${s.id}">
+        <div class="schedule-info">
+          <div class="schedule-name">${escapeHtml(s.name)}</div>
+          <div class="schedule-cron">${escapeHtml(s.cron_expression || s.trigger_type || 'once')}</div>
+          <div class="schedule-meta">
+            <span style="color:${statusColor}">${escapeHtml(s.status || 'active').toUpperCase()}</span>
+            <span>Runs: ${s.run_count || 0}${s.max_runs ? '/' + s.max_runs : ''}</span>
+            ${s.last_run_at ? `<span>Last: ${new Date(s.last_run_at).toLocaleString()}</span>` : ''}
+          </div>
+        </div>
+        <div class="schedule-actions">
+          ${s.status === 'active'
+            ? `<button class="btn btn-ghost btn-sm" onclick="toggleSchedule('${s.id}', 'pause')">Pause</button>`
+            : `<button class="btn btn-ghost btn-sm" onclick="toggleSchedule('${s.id}', 'resume')">Resume</button>`
+          }
+          <button class="btn btn-ghost btn-sm" onclick="deleteSchedule('${s.id}')">Delete</button>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+document.getElementById('btnNewSchedule')?.addEventListener('click', () => {
+  document.getElementById('scheduleForm')?.classList.toggle('hidden');
+});
+
+document.getElementById('btnCancelSchedule')?.addEventListener('click', () => {
+  document.getElementById('scheduleForm')?.classList.add('hidden');
+});
+
+document.getElementById('btnCreateSchedule')?.addEventListener('click', async () => {
+  const name = document.getElementById('schedName')?.value?.trim();
+  const cron = document.getElementById('schedCron')?.value?.trim();
+  const workflowStr = document.getElementById('schedWorkflow')?.value?.trim();
+
+  if (!name) { showToast('Name is required.', 'warn'); return; }
+  if (!cron) { showToast('Cron expression is required.', 'warn'); return; }
+
+  let workflow = {};
+  try {
+    workflow = workflowStr ? JSON.parse(workflowStr) : {};
+  } catch {
+    showToast('Invalid workflow JSON.', 'error');
+    return;
+  }
+
+  try {
+    const res = await fetch(`${API_BASE}/schedules`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name, cron_expression: cron, workflow, trigger_type: 'cron' }),
+    });
+    if (res.ok) {
+      showToast('Schedule created.', 'ok');
+      document.getElementById('scheduleForm')?.classList.add('hidden');
+      document.getElementById('schedName').value = '';
+      document.getElementById('schedCron').value = '';
+      document.getElementById('schedWorkflow').value = '';
+      loadSchedules();
+    } else {
+      const data = await res.json().catch(() => ({}));
+      showToast(`Failed: ${data.detail || 'Unknown error'}`, 'error');
+    }
+  } catch (err) {
+    showToast(`Network error: ${err.message}`, 'error');
+  }
+});
+
+async function toggleSchedule(id, action) {
+  try {
+    await fetch(`${API_BASE}/schedules/${id}/${action}`, { method: 'POST' });
+    showToast(`Schedule ${action}d.`, 'ok');
+    loadSchedules();
+  } catch (err) {
+    showToast(`Failed: ${err.message}`, 'error');
+  }
+}
+
+async function deleteSchedule(id) {
+  if (!confirm('Delete this schedule?')) return;
+  try {
+    await fetch(`${API_BASE}/schedules/${id}`, { method: 'DELETE' });
+    showToast('Schedule deleted.', 'ok');
+    loadSchedules();
+  } catch (err) {
+    showToast(`Failed: ${err.message}`, 'error');
+  }
+}
+
+
+// ══════════════════════════════════════════════════════════════
+//  PROJECT COMPLETION UX
+// ══════════════════════════════════════════════════════════════
+
+async function showProjectCompletion(projectId) {
+  try {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/summary`);
+    if (!res.ok) return;
+    const data = await res.json();
+
+    const panel = document.getElementById('completionPanel');
+    if (!panel) return;
+
+    if (data.status !== 'completed') {
+      panel.classList.add('hidden');
+      return;
+    }
+
+    panel.classList.remove('hidden');
+
+    // Time
+    const timeEl = document.getElementById('completionTime');
+    if (timeEl && data.completed_at) {
+      timeEl.textContent = new Date(data.completed_at).toLocaleString();
+    }
+
+    // Summary
+    const summaryEl = document.getElementById('completionSummary');
+    if (summaryEl) {
+      summaryEl.innerHTML = `
+        <div class="completion-stats">
+          <div class="cstat"><span class="cstat-val">${data.artifact_count || 0}</span><span class="cstat-label">Artifacts</span></div>
+          <div class="cstat"><span class="cstat-val">${data.task_counts?.completed || 0}</span><span class="cstat-label">Tasks Done</span></div>
+          <div class="cstat"><span class="cstat-val">${data.total_agents || 0}</span><span class="cstat-label">Agents Used</span></div>
+        </div>
+        ${data.summary ? `<div class="completion-text">${escapeHtml(data.summary).replace(/\n/g, '<br>')}</div>` : ''}
+      `;
+    }
+
+    // Next actions
+    const actionsEl = document.getElementById('nextActions');
+    if (actionsEl && data.next_actions?.length) {
+      const actionIcons = { download: '⬇', bookmark: '★', archive: '📦', copy: '⧉', github: '⚙' };
+      actionsEl.innerHTML = '<div class="next-actions-title">Next Steps</div>' +
+        data.next_actions.map(a => `
+          <button class="btn next-action-btn" data-action="${a.id}" data-project="${projectId}">
+            <span class="na-icon">${actionIcons[a.icon] || '→'}</span>
+            ${escapeHtml(a.label)}
+          </button>
+        `).join('');
+
+      actionsEl.querySelectorAll('.next-action-btn').forEach(btn => {
+        btn.addEventListener('click', () => handleNextAction(btn.dataset.action, btn.dataset.project));
+      });
+    }
+  } catch (err) {
+    console.warn('Failed to load completion data:', err);
+  }
+}
+
+async function handleNextAction(action, projectId) {
+  switch (action) {
+    case 'download':
+      window.open(`${API_BASE}/projects/${projectId}/download`, '_blank');
+      break;
+    case 'save_skill':
+      try {
+        const res = await fetch(`${API_BASE}/projects/${projectId}/save-as-skill`, { method: 'POST' });
+        if (res.ok) {
+          showToast('Project saved as skill template.', 'ok');
+          loadSkills();
+        }
+      } catch (err) {
+        showToast(`Failed: ${err.message}`, 'error');
+      }
+      break;
+    case 'archive':
+      try {
+        await fetch(`${API_BASE}/projects/${projectId}/archive`, { method: 'POST' });
+        showToast('Project archived.', 'ok');
+        await loadProjects();
+      } catch (err) {
+        showToast(`Failed: ${err.message}`, 'error');
+      }
+      break;
+    case 'duplicate':
+      // Re-use the project's brief to start a new one
+      try {
+        const res = await fetch(`${API_BASE}/projects/${projectId}`);
+        if (res.ok) {
+          const data = await res.json();
+          const p = data.project || {};
+          document.getElementById('inputProjectName').value = `${p.name || 'Project'} (copy)`;
+          document.getElementById('inputProjectBrief').value = p.brief || '';
+          document.getElementById('newProjectForm')?.classList.remove('hidden');
+        }
+      } catch (err) {
+        showToast(`Failed: ${err.message}`, 'error');
+      }
+      break;
+    case 'github_push':
+      const repo = prompt('GitHub repo (e.g., user/repo-name):');
+      if (!repo) return;
+      showToast('GitHub push not yet automated from UI. Use the API directly.', 'warn');
+      break;
+  }
+}
+
+// Hook into project selection to show completion panel
+const _origRefreshProject = refreshProject;
+refreshProject = async function(projectId) {
+  await _origRefreshProject(projectId);
+  showProjectCompletion(projectId);
+};
+
+// Listen for project_completed WebSocket event
+const _origHandleSwarmEvent2 = handleSwarmEvent;
+handleSwarmEvent = function(event) {
+  _origHandleSwarmEvent2(event);
+  if (event.type === 'project_completed' && event.project_id === state.activeProjectId) {
+    showProjectCompletion(event.project_id);
+    addFeedItem('ok', `<strong>Project completed!</strong> ${event.summary || 'All tasks done.'}`);
+  }
+};

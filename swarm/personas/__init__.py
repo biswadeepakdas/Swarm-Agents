@@ -12,6 +12,8 @@ from swarm.personas.tester import TESTER_PROMPT
 from swarm.personas.devops import DEVOPS_PROMPT
 from swarm.personas.product_manager import PRODUCT_MANAGER_PROMPT
 from swarm.personas.researcher import RESEARCHER_PROMPT
+from swarm.personas.evaluator import EVALUATOR_PROMPT
+from swarm.personas.integrator import INTEGRATOR_PROMPT
 
 PERSONA_PROMPTS: dict[str, str] = {
     "architect": ARCHITECT_PROMPT,
@@ -23,6 +25,8 @@ PERSONA_PROMPTS: dict[str, str] = {
     "devops": DEVOPS_PROMPT,
     "product_manager": PRODUCT_MANAGER_PROMPT,
     "researcher": RESEARCHER_PROMPT,
+    "evaluator": EVALUATOR_PROMPT,
+    "integrator": INTEGRATOR_PROMPT,
 }
 
 

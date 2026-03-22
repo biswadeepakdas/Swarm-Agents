@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Swarm Control</title>
+  <title>Perplexity Computer</title>
   <link id="appCss" rel="stylesheet" href="/static/style.css">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
@@ -17,7 +17,7 @@
     <div class="topbar-left">
       <div class="logo">
         <span class="logo-icon">⬡</span>
-        <span class="logo-text">SWARM CONTROL</span>
+        <span class="logo-text">PERPLEXITY COMPUTER</span>
       </div>
       <div class="topbar-divider"></div>
       <span class="topbar-status" id="connectionStatus">DISCONNECTED</span>
@@ -73,6 +73,9 @@
         <button class="tab" data-tab="graph">Swarm Graph</button>
         <button class="tab" data-tab="tasks">Task Board</button>
         <button class="tab" data-tab="agents">Agent Registry</button>
+        <button class="tab" data-tab="council">Council</button>
+        <button class="tab" data-tab="skills">Skills</button>
+        <button class="tab" data-tab="schedules">Schedules</button>
       </div>
 
       <!-- Tab: Live activity feed -->
@@ -159,6 +162,72 @@
           <div class="empty-state">No agents spawned yet.</div>
         </div>
       </div>
+
+      <!-- Tab: Council deliberation -->
+      <div class="tab-content" id="tabCouncil">
+        <div class="council-panel">
+          <div class="council-form">
+            <h3>Multi-Model Council</h3>
+            <p class="council-desc">Ask 2-4 LLMs the same question and get a synthesized recommendation.</p>
+            <textarea id="councilQuestion" placeholder="Describe the decision or question..." class="input textarea" rows="3" maxlength="5000"></textarea>
+            <textarea id="councilContext" placeholder="Optional context..." class="input textarea" rows="2" maxlength="10000"></textarea>
+            <div class="form-actions">
+              <select id="councilModels" class="input select">
+                <option value="2">2 Models</option>
+                <option value="3" selected>3 Models</option>
+                <option value="4">4 Models</option>
+              </select>
+              <button class="btn btn-primary" id="btnRunCouncil">Deliberate</button>
+            </div>
+          </div>
+          <div class="council-results" id="councilResults">
+            <div class="empty-state">Run a council deliberation to see model responses and synthesis.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: Skills / Templates -->
+      <div class="tab-content" id="tabSkills">
+        <div class="skills-panel">
+          <div class="skills-header">
+            <h3>Workflow Skills</h3>
+            <div class="skills-filter">
+              <button class="btn btn-sm skill-filter active" data-cat="all">All</button>
+              <button class="btn btn-sm skill-filter" data-cat="build">Build</button>
+              <button class="btn btn-sm skill-filter" data-cat="research">Research</button>
+              <button class="btn btn-sm skill-filter" data-cat="quality">Quality</button>
+              <button class="btn btn-sm skill-filter" data-cat="monitoring">Monitor</button>
+              <button class="btn btn-sm skill-filter" data-cat="custom">Custom</button>
+            </div>
+          </div>
+          <div class="skills-grid" id="skillsGrid">
+            <div class="empty-state">Loading skills...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tab: Schedules -->
+      <div class="tab-content" id="tabSchedules">
+        <div class="schedules-panel">
+          <div class="schedules-header">
+            <h3>Scheduled Tasks</h3>
+            <button class="btn btn-primary btn-sm" id="btnNewSchedule">+ New Schedule</button>
+          </div>
+          <!-- New schedule form (hidden) -->
+          <div class="schedule-form hidden" id="scheduleForm">
+            <input type="text" id="schedName" placeholder="Schedule name" class="input" maxlength="200">
+            <input type="text" id="schedCron" placeholder="Cron: */30 * * * * (every 30 min)" class="input">
+            <textarea id="schedWorkflow" placeholder='{"task_type":"research","brief":"Daily market update","priority":2}' class="input textarea" rows="3"></textarea>
+            <div class="form-actions">
+              <button class="btn btn-ghost btn-sm" id="btnCancelSchedule">Cancel</button>
+              <button class="btn btn-primary btn-sm" id="btnCreateSchedule">Create</button>
+            </div>
+          </div>
+          <div class="schedules-list" id="schedulesList">
+            <div class="empty-state">No scheduled tasks. Create one to run workflows on a timer.</div>
+          </div>
+        </div>
+      </div>
     </section>
 
     <!-- RIGHT PANEL: Artifact viewer + inject -->
@@ -193,6 +262,16 @@
         </div>
         <div class="detail-meta" id="detailMeta"></div>
         <pre class="detail-content" id="detailContent"></pre>
+      </div>
+
+      <!-- Project completion summary (shown when project completes) -->
+      <div class="completion-panel hidden" id="completionPanel">
+        <div class="completion-header">
+          <span class="completion-badge">COMPLETED</span>
+          <span class="completion-time" id="completionTime"></span>
+        </div>
+        <div class="completion-summary" id="completionSummary"></div>
+        <div class="next-actions" id="nextActions"></div>
       </div>
 
       <!-- Inject requirement -->

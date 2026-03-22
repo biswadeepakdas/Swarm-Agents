@@ -22,6 +22,9 @@ class MemoryDB:
         self.agents: dict[str, dict] = {}
         self.artifacts: dict[str, dict] = {}
         self.memories: list[dict] = []
+        self._scheduled_tasks: dict[str, dict] = {}
+        self._skills: dict[str, dict] = {}
+        self._council_sessions: dict[str, dict] = {}
         self.pool = self  # Fake pool for API routes that access pool.acquire()
 
     async def connect(self) -> None:
@@ -168,6 +171,71 @@ class MemoryDB:
 
     async def get_artifact(self, artifact_id: str) -> dict[str, Any] | None:
         return self.artifacts.get(str(artifact_id))
+
+    # ── Scheduled Task CRUD ──────────────────────────────────
+
+    async def create_scheduled_task(self, task: dict[str, Any]) -> dict[str, Any]:
+        tid = str(task["id"])
+        task.setdefault("created_at", datetime.now(timezone.utc))
+        task.setdefault("run_count", 0)
+        task.setdefault("enabled", True)
+        self._scheduled_tasks[tid] = task
+        return task
+
+    async def get_scheduled_tasks(self, enabled_only: bool = False) -> list[dict]:
+        tasks = list(self._scheduled_tasks.values())
+        if enabled_only:
+            tasks = [t for t in tasks if t.get("enabled")]
+        return tasks
+
+    async def get_scheduled_task(self, task_id: str) -> dict[str, Any] | None:
+        return self._scheduled_tasks.get(str(task_id))
+
+    async def update_scheduled_task(self, task_id: str, **kwargs: Any) -> None:
+        tid = str(task_id)
+        if tid in self._scheduled_tasks:
+            self._scheduled_tasks[tid].update(kwargs)
+
+    async def delete_scheduled_task(self, task_id: str) -> None:
+        self._scheduled_tasks.pop(str(task_id), None)
+
+    # ── Skill CRUD ──────────────────────────────────────────
+
+    async def create_skill(self, skill: dict[str, Any]) -> dict[str, Any]:
+        sid = str(skill["id"])
+        skill.setdefault("created_at", datetime.now(timezone.utc))
+        skill.setdefault("usage_count", 0)
+        self._skills[sid] = skill
+        return skill
+
+    async def get_skills(self, category: str | None = None) -> list[dict]:
+        skills = list(self._skills.values())
+        if category:
+            skills = [s for s in skills if s.get("category") == category]
+        return skills
+
+    async def get_skill(self, skill_id: str) -> dict[str, Any] | None:
+        return self._skills.get(str(skill_id))
+
+    async def increment_skill_usage(self, skill_id: str) -> None:
+        sid = str(skill_id)
+        if sid in self._skills:
+            self._skills[sid]["usage_count"] = self._skills[sid].get("usage_count", 0) + 1
+
+    # ── Council CRUD ────────────────────────────────────────
+
+    async def create_council_session(self, session: dict[str, Any]) -> dict[str, Any]:
+        sid = str(session["id"])
+        session.setdefault("created_at", datetime.now(timezone.utc))
+        self._council_sessions[sid] = session
+        return session
+
+    async def get_council_sessions(self, project_id: str | None = None) -> list[dict]:
+        sessions = list(self._council_sessions.values())
+        if project_id:
+            sessions = [s for s in sessions if str(s.get("project_id")) == str(project_id)]
+        sessions.sort(key=lambda x: str(x.get("created_at", "")), reverse=True)
+        return sessions
 
     # ── Memory CRUD ───────────────────────────────────────────
 

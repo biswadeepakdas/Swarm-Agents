@@ -49,6 +49,7 @@ redis_client = RedisClient()
 task_queue: TaskQueue | None = None
 environment: Environment | None = None
 spawn_loop_task: asyncio.Task | None = None
+scheduler_task: asyncio.Task | None = None
 
 
 async def _init_db():
@@ -77,7 +78,7 @@ async def _init_db():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global db, task_queue, environment, spawn_loop_task
+    global db, task_queue, environment, spawn_loop_task, scheduler_task
 
     logger.info("=" * 60)
     logger.info("  SWARM AGENTS ENGINE — Starting up")
@@ -108,6 +109,12 @@ async def lifespan(app: FastAPI):
     spawn_loop_task = asyncio.create_task(task_queue.start_spawn_loop())
     logger.info("Spawn loop launched in background")
 
+    # 5. Start the scheduler
+    from swarm.core.scheduler import Scheduler
+    scheduler = Scheduler(db=db, redis=redis_client, task_queue=task_queue)
+    scheduler_task = asyncio.create_task(scheduler.start())
+    logger.info("Scheduler launched in background")
+
     logger.info("=" * 60)
     logger.info("  SWARM AGENTS ENGINE — Ready")
     logger.info(f"  Dashboard: http://localhost:{os.getenv('PORT', '8000')}")
@@ -122,6 +129,12 @@ async def lifespan(app: FastAPI):
     logger.info("Shutting down swarm engine...")
     if task_queue:
         await task_queue.stop()
+    if scheduler_task:
+        scheduler_task.cancel()
+        try:
+            await scheduler_task
+        except asyncio.CancelledError:
+            pass
     if spawn_loop_task:
         spawn_loop_task.cancel()
         try:
@@ -139,7 +152,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Swarm Agents Engine",
     description="Self-organizing multi-agent swarm that builds software products autonomously.",
-    version="0.1.0",
+    version="0.4.0",
     lifespan=lifespan,
 )
 

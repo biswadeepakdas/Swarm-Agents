@@ -52,6 +52,11 @@ TASK_OUTPUT_MAP: dict[TaskType, ArtifactType] = {
     TaskType.FIX_CODE: ArtifactType.CODE_FILE,
     TaskType.INTEGRATION_TEST: ArtifactType.TEST_SUITE,
     TaskType.RESOLVE_CONFLICT: ArtifactType.DECISION,
+    # New: Perplexity Computer spec
+    TaskType.EVALUATE_PROJECT: ArtifactType.EVALUATION_REPORT,
+    TaskType.ASSEMBLE_DELIVERABLES: ArtifactType.DELIVERABLES_PACKAGE,
+    TaskType.GENERATE_MEDIA: ArtifactType.MEDIA_ASSET,
+    TaskType.COUNCIL_REVIEW: ArtifactType.DECISION,
 }
 
 # Maximum tool-use iterations per agent (keep low for fast completion)
@@ -113,6 +118,9 @@ class SwarmAgent:
         self._web_search = None
         self._web_browser = None
         self._env_query = None
+        self._media_gen = None
+        self._github_tool = None
+        self._council = None
         self._ask_user_count = 0  # Limit ask_user calls per agent
 
     def _init_tools(self) -> None:
@@ -140,6 +148,18 @@ class SwarmAgent:
         if "query_artifacts" in self._tool_names:
             from swarm.tools.environment_query import EnvironmentQueryTool
             self._env_query = EnvironmentQueryTool(self.environment, self.task.project_id)
+
+        if "generate_image" in self._tool_names:
+            from swarm.tools.media_gen import MediaGenTool
+            self._media_gen = MediaGenTool()
+
+        if "github_push" in self._tool_names:
+            from swarm.tools.github_tool import GitHubTool
+            self._github_tool = GitHubTool()
+
+        if "council_deliberate" in self._tool_names:
+            from swarm.core.council import get_council
+            self._council = get_council()
 
     async def _emit_progress(self, phase: str, detail: str = "") -> None:
         """Emit a real-time progress event so the user sees what's happening."""
@@ -470,6 +490,51 @@ class SwarmAgent:
                 await self.db.expire_interactions(self.task.id)
                 await self._emit_progress("ask_timeout", "User didn't respond in time, proceeding with best judgment")
                 return "User did not respond in time. Proceed with your best judgment and submit your artifact."
+
+            elif name == "generate_image":
+                if not self._media_gen:
+                    return "Image generation not available for this task type."
+                prompt = args.get("prompt", "")
+                style = args.get("style", "professional")
+                result = await self._media_gen.generate_image(prompt, style)
+                if result.success:
+                    return (
+                        f"Image generated ({result.provider}):\n"
+                        f"Type: {result.media_type}\n"
+                        f"Description: {result.description}\n"
+                        f"Content: [base64 data, {len(result.content)} chars]"
+                    )
+                return f"Image generation failed: {result.error}. Create a text description instead."
+
+            elif name == "github_push":
+                if not self._github_tool:
+                    return "GitHub integration not available for this task type."
+                if not self._github_tool.available:
+                    return "GITHUB_TOKEN not configured. Include the code in your artifact instead."
+                result = await self._github_tool.create_or_update_file(
+                    repo=args.get("repo", ""),
+                    path=args.get("path", ""),
+                    content=args.get("content", ""),
+                    message=args.get("message", "Update via Swarm Agents"),
+                )
+                if result.success:
+                    return f"Pushed to GitHub: {result.data.get('url', result.data.get('path', ''))}"
+                return f"GitHub push failed: {result.error}"
+
+            elif name == "council_deliberate":
+                if not self._council:
+                    return "Council deliberation not available."
+                question = args.get("question", "")
+                context = args.get("context", "")
+                result = await self._council.deliberate(question, context)
+                output = f"## Council Deliberation ({len(result.votes)} models, {result.total_latency_ms}ms)\n\n"
+                output += f"**Agreement Score:** {result.agreement_score:.0%}\n\n"
+                for v in result.votes:
+                    status = f"({v.latency_ms}ms)" if not v.error else f"(FAILED: {v.error[:50]})"
+                    output += f"### {v.model} {status}\n{v.content[:500]}\n\n"
+                output += f"## Synthesis\n{result.synthesis}\n\n"
+                output += f"**Chosen Approach:** {result.chosen_approach}\n"
+                return output
 
             elif name == "submit_artifact":
                 self._submitted_artifact = args

@@ -38,6 +38,11 @@ TASK_PERSONA_MAP: dict[TaskType, tuple[str, str]] = {
     TaskType.FIX_CODE: ("Software Engineer", "backend_engineer"),
     TaskType.INTEGRATION_TEST: ("QA Engineer", "tester"),
     TaskType.RESOLVE_CONFLICT: ("Tech Lead", "reviewer"),
+    # New: Perplexity Computer spec
+    TaskType.EVALUATE_PROJECT: ("Project Evaluator", "evaluator"),
+    TaskType.ASSEMBLE_DELIVERABLES: ("Delivery Engineer", "integrator"),
+    TaskType.GENERATE_MEDIA: ("Media Designer", "designer"),
+    TaskType.COUNCIL_REVIEW: ("Council Moderator", "reviewer"),
 }
 
 

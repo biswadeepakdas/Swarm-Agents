@@ -165,10 +165,9 @@ class TaskQueue:
             logger.exception("Orphaned task recovery error")
 
     async def _check_project_completion(self) -> None:
-        """If all tasks in a project are completed/dead, mark project as completed."""
+        """If all tasks in a project are completed/dead, mark project as completed.
+        Spawns EvalAgent and AssemblerAgent before finalizing."""
         try:
-            from swarm.api.routes import _db as routes_db
-            # Get all active projects
             projects = await self.db.get_projects() if hasattr(self.db, 'get_projects') else []
             for p in projects:
                 if p.get("status") != "active":
@@ -177,17 +176,91 @@ class TaskQueue:
                 tasks = await self.db.get_tasks(pid)
                 if not tasks:
                     continue
+
                 # Check if all tasks are terminal (completed, dead)
                 all_done = all(t.get("status") in ("completed", "dead") for t in tasks)
-                if all_done:
-                    await self.db.update_project(pid, status="completed")
-                    await self.redis.publish_event({
-                        "type": "project_completed",
-                        "project_id": str(pid),
-                    })
-                    logger.info(f"Project {pid} auto-completed (all {len(tasks)} tasks done)")
+                if not all_done:
+                    continue
+
+                # Check if we already have eval/assemble tasks (don't double-spawn)
+                task_types = {t.get("type") for t in tasks}
+                has_eval = "evaluate_project" in task_types
+                has_assemble = "assemble_deliverables" in task_types
+
+                # Only mark complete if eval/assemble are done (or we need to spawn them)
+                if not has_eval and len(tasks) >= 3:
+                    # Spawn evaluation task
+                    eval_task = Task(
+                        type=TaskType.EVALUATE_PROJECT,
+                        payload={
+                            "trigger": "project_completion",
+                            "project_name": p.get("name", ""),
+                            "brief": p.get("brief", ""),
+                        },
+                        priority=TaskPriority.HIGH,
+                        project_id=pid,
+                    )
+                    await self.submit(eval_task)
+                    logger.info(f"Project {pid}: spawned EvalAgent for quality check")
+                    continue
+
+                if not has_assemble and has_eval:
+                    # Spawn deliverables assembly task
+                    assemble_task = Task(
+                        type=TaskType.ASSEMBLE_DELIVERABLES,
+                        payload={
+                            "trigger": "project_completion",
+                            "project_name": p.get("name", ""),
+                            "brief": p.get("brief", ""),
+                        },
+                        priority=TaskPriority.NORMAL,
+                        project_id=pid,
+                    )
+                    await self.submit(assemble_task)
+                    logger.info(f"Project {pid}: spawned IntegrationAgent for assembly")
+                    continue
+
+                # Generate project summary
+                summary = await self._generate_project_summary(p, tasks)
+
+                from datetime import datetime as _dt, timezone as _tz
+                await self.db.update_project(
+                    pid,
+                    status="completed",
+                    summary=summary,
+                    completed_at=_dt.now(_tz.utc),
+                )
+                await self.redis.publish_event({
+                    "type": "project_completed",
+                    "project_id": str(pid),
+                    "summary": summary[:500],
+                })
+                logger.info(f"Project {pid} auto-completed (all {len(tasks)} tasks done)")
+
         except Exception:
             logger.exception("Project completion check error")
+
+    async def _generate_project_summary(self, project: dict, tasks: list[dict]) -> str:
+        """Generate a concise project summary."""
+        try:
+            artifacts = await self.db.query_artifacts(str(project["id"]))
+            art_types = {}
+            for a in artifacts:
+                t = a.get("type", "unknown")
+                art_types[t] = art_types.get(t, 0) + 1
+
+            completed = sum(1 for t in tasks if t.get("status") == "completed")
+            failed = sum(1 for t in tasks if t.get("status") in ("failed", "dead"))
+
+            summary = f"## Project: {project.get('name', 'Untitled')}\n\n"
+            summary += f"**Brief:** {project.get('brief', '')[:200]}\n\n"
+            summary += f"**Results:** {completed} tasks completed, {failed} failed, {len(artifacts)} artifacts produced\n\n"
+            summary += "**Artifacts:**\n"
+            for atype, count in sorted(art_types.items()):
+                summary += f"- {atype}: {count}\n"
+            return summary
+        except Exception:
+            return f"Project {project.get('name', '')} completed."
 
     def _on_agent_done(self, task_id: str, future: asyncio.Task) -> None:
         self._semaphore.release()

@@ -28,6 +28,11 @@ class TaskType(StrEnum):
     FIX_CODE = "fix_code"
     INTEGRATION_TEST = "integration_test"
     RESOLVE_CONFLICT = "resolve_conflict"
+    # New: Perplexity Computer spec
+    EVALUATE_PROJECT = "evaluate_project"
+    ASSEMBLE_DELIVERABLES = "assemble_deliverables"
+    GENERATE_MEDIA = "generate_media"
+    COUNCIL_REVIEW = "council_review"
 
 
 class TaskStatus(StrEnum):

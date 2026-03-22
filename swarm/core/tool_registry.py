@@ -186,6 +186,79 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "generate_image",
+            "description": "Generate an image or visual asset from a text description. Returns an image (or SVG placeholder if no image API key is configured). Use for UI mockups, diagrams, logos, illustrations.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {
+                        "type": "string",
+                        "description": "Description of the image to generate",
+                    },
+                    "style": {
+                        "type": "string",
+                        "description": "Visual style: professional, minimalist, colorful, dark, etc.",
+                        "default": "professional",
+                    },
+                },
+                "required": ["prompt"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "github_push",
+            "description": "Push a file to a GitHub repository. Requires GITHUB_TOKEN env var. Creates or updates a file in the specified repo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo": {
+                        "type": "string",
+                        "description": "Repository full name (e.g., 'user/repo-name')",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "File path in the repo (e.g., 'src/main.py')",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "File content to push",
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Commit message",
+                        "default": "Update via Swarm Agents",
+                    },
+                },
+                "required": ["repo", "path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "council_deliberate",
+            "description": "Run a multi-model council deliberation on a high-impact question. Sends the question to 2-4 different LLMs, compares responses, and synthesizes a recommendation. Use for architecture decisions, security trade-offs, or design choices.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question or decision to deliberate on",
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Background context for the decision",
+                    },
+                },
+                "required": ["question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "submit_artifact",
             "description": "Submit your final artifact (code, design, review, etc.). Call this when your work is complete. This is REQUIRED — you must submit exactly one artifact.",
             "parameters": {
@@ -224,7 +297,7 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 TASK_TOOL_MAP: dict[TaskType, list[str]] = {
     # Research/planning agents: search + browse + ask_user + query
     TaskType.ANALYZE_REQUIREMENTS: ["web_search", "fetch_page", "ask_user", "query_artifacts", "submit_artifact"],
-    TaskType.PLAN_ARCHITECTURE: ["web_search", "fetch_page", "ask_user", "query_artifacts", "submit_artifact"],
+    TaskType.PLAN_ARCHITECTURE: ["web_search", "fetch_page", "ask_user", "council_deliberate", "query_artifacts", "submit_artifact"],
     TaskType.RESEARCH: ["web_search", "fetch_page", "query_artifacts", "submit_artifact"],
 
     # Build agents: full toolset (code + files + search + browse + ask_user)
@@ -247,6 +320,12 @@ TASK_TOOL_MAP: dict[TaskType, list[str]] = {
     # Docs
     TaskType.WRITE_DOCS: ["web_search", "fetch_page", "query_artifacts", "write_file", "submit_artifact"],
     TaskType.RESOLVE_CONFLICT: ["ask_user", "query_artifacts", "submit_artifact"],
+
+    # New: Perplexity Computer spec
+    TaskType.EVALUATE_PROJECT: ["query_artifacts", "run_python", "council_deliberate", "submit_artifact"],
+    TaskType.ASSEMBLE_DELIVERABLES: ["query_artifacts", "read_file", "list_files", "write_file", "submit_artifact"],
+    TaskType.GENERATE_MEDIA: ["generate_image", "web_search", "query_artifacts", "submit_artifact"],
+    TaskType.COUNCIL_REVIEW: ["council_deliberate", "query_artifacts", "web_search", "submit_artifact"],
 }
 
 
