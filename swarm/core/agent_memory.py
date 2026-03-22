@@ -6,11 +6,18 @@ Each agent has its OWN memory:
   - Long-term (PostgreSQL + pgvector): expertise, patterns, decisions with semantic search
 
 Memory is assembled into the LLM system prompt before every call.
+
+Embedding backends (tried in order):
+  1. NVIDIA NIM API (free, 1024-dim → truncated to 384)
+  2. OpenAI embeddings API
+  3. sentence-transformers (local, if installed)
+  4. No embeddings (memory still stored, just not searchable)
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -22,27 +29,131 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("swarm.agent_memory")
 
-# Lazy-loaded embedding model
-_embed_model = None
+# Target embedding dimension (must match pgvector column: vector(384))
+EMBED_DIM = 384
+
+# Cache the embedding backend so we don't re-detect every call
+_embed_backend: str | None = None
+_embed_model: Any = None
 
 
-def _get_embed_model():
+async def _embed_nvidia(text: str) -> list[float] | None:
+    """Use NVIDIA NIM embedding API (free tier)."""
+    api_key = os.getenv("NVIDIA_API_KEY", "")
+    if not api_key:
+        return None
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                "https://integrate.api.nvidia.com/v1/embeddings",
+                json={
+                    "input": [text[:2000]],  # truncate to fit
+                    "model": "nvidia/nv-embedqa-e5-v5",
+                    "input_type": "query",
+                    "encoding_format": "float",
+                    "truncate": "END",
+                },
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            embedding = data["data"][0]["embedding"]
+            # Truncate/pad to EMBED_DIM
+            if len(embedding) > EMBED_DIM:
+                embedding = embedding[:EMBED_DIM]
+            elif len(embedding) < EMBED_DIM:
+                embedding += [0.0] * (EMBED_DIM - len(embedding))
+            return embedding
+    except Exception as e:
+        logger.warning(f"NVIDIA embedding failed: {e}")
+        return None
+
+
+async def _embed_openai(text: str) -> list[float] | None:
+    """Use OpenAI embedding API."""
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key:
+        return None
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                "https://api.openai.com/v1/embeddings",
+                json={
+                    "input": text[:2000],
+                    "model": "text-embedding-3-small",
+                    "dimensions": EMBED_DIM,
+                },
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["data"][0]["embedding"]
+    except Exception as e:
+        logger.warning(f"OpenAI embedding failed: {e}")
+        return None
+
+
+def _embed_local(text: str) -> list[float] | None:
+    """Use local sentence-transformers (if installed)."""
     global _embed_model
-    if _embed_model is None:
-        try:
+    try:
+        if _embed_model is None:
             from sentence_transformers import SentenceTransformer
             _embed_model = SentenceTransformer(config.embedding_model)
-            logger.info(f"Embedding model loaded: {config.embedding_model}")
-        except ImportError:
-            logger.warning("sentence-transformers not installed — long-term memory search disabled")
-    return _embed_model
-
-
-def embed_text(text: str) -> list[float] | None:
-    model = _get_embed_model()
-    if model is None:
+            logger.info(f"Local embedding model loaded: {config.embedding_model}")
+        return _embed_model.encode(text).tolist()
+    except ImportError:
         return None
-    return model.encode(text).tolist()
+    except Exception as e:
+        logger.warning(f"Local embedding failed: {e}")
+        return None
+
+
+async def embed_text(text: str) -> list[float] | None:
+    """
+    Generate an embedding for text using the best available backend.
+    Returns a list of floats with dimension EMBED_DIM, or None.
+    """
+    global _embed_backend
+
+    # Try backends in priority order
+    if _embed_backend in (None, "nvidia"):
+        result = await _embed_nvidia(text)
+        if result:
+            _embed_backend = "nvidia"
+            return result
+
+    if _embed_backend in (None, "openai"):
+        result = await _embed_openai(text)
+        if result:
+            _embed_backend = "openai"
+            return result
+
+    if _embed_backend in (None, "local"):
+        result = _embed_local(text)
+        if result:
+            _embed_backend = "local"
+            return result
+
+    if _embed_backend is None:
+        _embed_backend = "none"
+        logger.warning("No embedding backend available — long-term memory search disabled")
+
+    return None
+
+
+# Synchronous wrapper for backwards compat
+def embed_text_sync(text: str) -> list[float] | None:
+    """Synchronous embedding — only uses local model."""
+    return _embed_local(text)
 
 
 class AgentMemory:
@@ -98,7 +209,7 @@ class AgentMemory:
 
     async def memorize(self, content: str, tags: list[str] | None = None) -> None:
         """Store a long-term memory with vector embedding."""
-        embedding = embed_text(content)
+        embedding = await embed_text(content)
         await self.db.store_memory({
             "id": str(uuid.uuid4()),
             "project_id": self.project_id,
@@ -110,12 +221,32 @@ class AgentMemory:
         logger.debug(f"Agent {self.agent_id} memorized: {content[:80]}...")
 
     async def recall(self, query: str, k: int = 5) -> list[dict]:
-        """Semantic search over long-term memories."""
-        embedding = embed_text(query)
+        """Semantic search over long-term memories for this project."""
+        embedding = await embed_text(query)
         if embedding is None:
-            return []
+            # Fallback: return recent memories by tag
+            return await self._recall_by_tags(k)
         results = await self.db.search_memories(self.project_id, embedding, k=k)
         return results
+
+    async def recall_cross_project(self, query: str, k: int = 3) -> list[dict]:
+        """Search memories across ALL projects — for cross-project learning."""
+        embedding = await embed_text(query)
+        if embedding is None:
+            return []
+        return await self.db.search_memories_global(embedding, k=k)
+
+    async def _recall_by_tags(self, k: int = 5) -> list[dict]:
+        """Fallback memory recall — returns recent memories (no vector search)."""
+        try:
+            async with self.db.pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT * FROM memories WHERE project_id = $1 ORDER BY created_at DESC LIMIT $2",
+                    self.project_id, k,
+                )
+                return [dict(r) for r in rows]
+        except Exception:
+            return []
 
     # ── Context window assembly ───────────────────────────────────
 
@@ -124,8 +255,9 @@ class AgentMemory:
         Assemble full context for LLM call:
           1. Project context (from environment)
           2. Long-term memories (top 5 semantically similar)
-          3. Short-term reasoning chain (last 10)
-          4. Working artifact state
+          3. Cross-project memories (top 3 from other projects)
+          4. Short-term reasoning chain (last 10)
+          5. Working artifact state
         """
         parts: list[str] = []
 
@@ -146,7 +278,7 @@ class AgentMemory:
                 parts.append(f"\nTask status: {task_counts}")
             parts.append("")
 
-        # 2. Long-term memories
+        # 2. Long-term memories (this project)
         memories = await self.recall(task_summary, k=5)
         if memories:
             parts.append("## Relevant Memories (from past work on this project)")
@@ -154,7 +286,20 @@ class AgentMemory:
                 parts.append(f"- {m.get('content', '')}")
             parts.append("")
 
-        # 3. Short-term reasoning chain
+        # 3. Cross-project memories
+        try:
+            cross_memories = await self.recall_cross_project(task_summary, k=3)
+            # Filter out memories from this project (already included above)
+            cross_memories = [m for m in cross_memories if str(m.get('project_id', '')) != self.project_id]
+            if cross_memories:
+                parts.append("## Insights from Other Projects")
+                for m in cross_memories:
+                    parts.append(f"- {m.get('content', '')}")
+                parts.append("")
+        except Exception:
+            pass  # Cross-project search is optional
+
+        # 4. Short-term reasoning chain
         chain = await self.get_reasoning_chain()
         if chain:
             parts.append("## Recent Reasoning")
@@ -164,7 +309,7 @@ class AgentMemory:
                 parts.append(f"- {action}: {result}")
             parts.append("")
 
-        # 4. Working artifact
+        # 5. Working artifact
         working = await self.get_working_artifact()
         if working:
             parts.append("## Current Working Artifact")

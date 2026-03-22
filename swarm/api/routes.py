@@ -358,7 +358,120 @@ async def get_graph(project_id: str):
 
 @router.get("/health")
 async def health():
-    return {"status": "ok", "engine": "swarm-agents", "version": "0.2.0"}
+    return {"status": "ok", "engine": "swarm-agents", "version": "0.3.0"}
+
+
+# ── Agent-User Interactions ──────────────────────────────────
+
+class AnswerInteractionRequest(BaseModel):
+    response: str = Field(..., min_length=1, max_length=5000)
+
+
+@router.get("/projects/{project_id}/interactions")
+async def get_interactions(project_id: str, status: str = "pending"):
+    """Get agent questions waiting for user response."""
+    project = await _db.get_project(project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+
+    if status == "pending":
+        interactions = await _db.get_pending_interactions(project_id)
+    else:
+        # Get all interactions
+        async with _db.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM interactions WHERE project_id = $1 ORDER BY created_at DESC LIMIT 50",
+                project_id,
+            )
+            interactions = [dict(r) for r in rows]
+
+    return {
+        "project_id": project_id,
+        "total": len(interactions),
+        "interactions": [_serialize_record(i) for i in interactions],
+    }
+
+
+@router.post("/interactions/{interaction_id}/answer")
+async def answer_interaction(interaction_id: str, req: AnswerInteractionRequest):
+    """Answer an agent's question. The agent will resume processing."""
+    result = await _db.answer_interaction(interaction_id, req.response)
+    if not result:
+        raise HTTPException(404, "Interaction not found or already answered")
+
+    # Emit event so the agent's polling loop picks it up
+    await _redis.publish_event({
+        "type": "interaction_answered",
+        "interaction_id": interaction_id,
+        "project_id": str(result.get("project_id", "")),
+        "task_id": result.get("task_id"),
+        "agent_id": result.get("agent_id"),
+        "response": req.response,
+    })
+
+    return {
+        "message": "Response recorded. Agent will resume shortly.",
+        "interaction_id": interaction_id,
+    }
+
+
+# ── Dead Task Cleanup ────────────────────────────────────────
+
+@router.post("/projects/{project_id}/cleanup")
+async def cleanup_project(project_id: str):
+    """Clean up dead/stuck tasks in a specific project."""
+    project = await _db.get_project(project_id)
+    if not project:
+        raise HTTPException(404, "Project not found")
+
+    async with _db.pool.acquire() as conn:
+        # Kill zombie agents
+        r1 = await conn.execute(
+            "UPDATE agents SET status = 'dead', died_at = NOW() "
+            "WHERE project_id = $1 AND status IN ('alive', 'working')",
+            project_id,
+        )
+        zombie_agents = int(r1.split()[-1]) if r1 else 0
+
+        # Fail stuck tasks
+        r2 = await conn.execute(
+            "UPDATE tasks SET status = 'dead', error = 'Manual cleanup' "
+            "WHERE project_id = $1 AND status IN ('active', 'pending', 'waiting')",
+            project_id,
+        )
+        stuck_tasks = int(r2.split()[-1]) if r2 else 0
+
+        # Expire pending interactions
+        r3 = await conn.execute(
+            "UPDATE interactions SET status = 'expired' "
+            "WHERE project_id = $1 AND status = 'pending'",
+            project_id,
+        )
+        expired_interactions = int(r3.split()[-1]) if r3 else 0
+
+    return {
+        "message": "Cleanup complete",
+        "zombie_agents_killed": zombie_agents,
+        "stuck_tasks_failed": stuck_tasks,
+        "interactions_expired": expired_interactions,
+    }
+
+
+@router.post("/admin/cleanup-all")
+async def admin_cleanup_all():
+    """Force cleanup of ALL zombie agents and tasks across all projects."""
+    result = await _db.cleanup_stale_on_startup()
+
+    # Also expire old pending interactions
+    async with _db.pool.acquire() as conn:
+        r = await conn.execute(
+            "UPDATE interactions SET status = 'expired' "
+            "WHERE status = 'pending' AND created_at < NOW() - INTERVAL '10 minutes'"
+        )
+        expired = int(r.split()[-1]) if r else 0
+
+    result["expired_interactions"] = expired
+    return {"cleaned": result}
 
 
 # ── Project Download ─────────────────────────────────────────

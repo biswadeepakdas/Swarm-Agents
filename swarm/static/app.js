@@ -204,6 +204,9 @@ function selectProject(projectId) {
 
   // Fetch initial data
   refreshProject(projectId);
+
+  // Load any pending agent questions
+  loadPendingInteractions(projectId);
 }
 
 async function refreshProject(projectId) {
@@ -456,6 +459,27 @@ function handleSwarmEvent(event) {
 
     case 'llm_usage':
       // Silent — just track
+      break;
+
+    case 'agent_question':
+      // An agent is asking the user a question
+      if (event.agent_id) _agentPhases[event.agent_id] = 'waiting_for_user';
+      showAgentQuestion(event);
+      addFeedItem('task',
+        `<strong>${event.agent_name || 'Agent'}</strong> is asking: ` +
+        `<em>${escapeHtml((event.question || '').slice(0, 100))}</em>`
+      );
+      showToast('An agent needs your input!', 'warn');
+      renderSwarmProgress();
+      break;
+
+    case 'interaction_answered':
+      addFeedItem('complete',
+        `User responded to agent question: <em>${escapeHtml((event.response || '').slice(0, 80))}</em>`
+      );
+      // Remove the question card from the UI
+      removeAgentQuestion(event.interaction_id);
+      renderSwarmProgress();
       break;
   }
 
@@ -912,6 +936,142 @@ function showToast(message, type = 'ok') {
     toast.classList.remove('toast-visible');
     setTimeout(() => toast.remove(), 300);
   }, 4000);
+}
+
+// ── Agent Question UI ─────────────────────────────────────────
+
+function showAgentQuestion(event) {
+  // Create or find the questions container
+  let container = document.getElementById('agentQuestions');
+  if (!container) {
+    container = document.createElement('div');
+    container.id = 'agentQuestions';
+    container.className = 'agent-questions-container';
+    // Insert at the top of the activity feed
+    const feed = document.getElementById('tabActivity');
+    if (feed) feed.prepend(container);
+  }
+
+  const qid = event.interaction_id;
+  const options = event.options || [];
+
+  const card = document.createElement('div');
+  card.className = 'agent-question-card';
+  card.id = `question-${qid}`;
+  card.innerHTML = `
+    <div class="aq-header">
+      <span class="aq-icon">?</span>
+      <strong>${escapeHtml(event.agent_name || 'Agent')}</strong> needs your input
+    </div>
+    <div class="aq-question">${escapeHtml(event.question || '')}</div>
+    ${event.context ? `<div class="aq-context">${escapeHtml(event.context)}</div>` : ''}
+    ${options.length > 0 ? `
+      <div class="aq-options">
+        ${options.map((opt, i) => `
+          <button class="btn btn-ghost btn-sm aq-option" data-qid="${qid}" data-answer="${escapeHtml(opt)}">${escapeHtml(opt)}</button>
+        `).join('')}
+      </div>
+    ` : ''}
+    <div class="aq-input-row">
+      <input type="text" class="input aq-input" id="aq-input-${qid}" placeholder="Type your response...">
+      <button class="btn btn-primary btn-sm aq-submit" data-qid="${qid}">Send</button>
+    </div>
+    <div class="aq-timer">Agent is waiting...</div>
+  `;
+
+  container.prepend(card);
+
+  // Option buttons fill the input
+  card.querySelectorAll('.aq-option').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const input = card.querySelector('.aq-input');
+      input.value = btn.dataset.answer;
+    });
+  });
+
+  // Submit handler
+  card.querySelector('.aq-submit').addEventListener('click', () => {
+    const input = card.querySelector('.aq-input');
+    const answer = input.value.trim();
+    if (!answer) {
+      shakeElement(input);
+      return;
+    }
+    submitAgentAnswer(qid, answer, card);
+  });
+
+  // Enter key handler
+  card.querySelector('.aq-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const answer = e.target.value.trim();
+      if (answer) submitAgentAnswer(qid, answer, card);
+    }
+  });
+}
+
+async function submitAgentAnswer(interactionId, answer, card) {
+  const submitBtn = card.querySelector('.aq-submit');
+  submitBtn.disabled = true;
+  submitBtn.textContent = 'Sending...';
+
+  try {
+    const res = await fetch(`${API_BASE}/interactions/${interactionId}/answer`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ response: answer }),
+    });
+    if (res.ok) {
+      card.classList.add('aq-answered');
+      card.querySelector('.aq-timer').textContent = `Answered: ${answer}`;
+      card.querySelector('.aq-input-row').remove();
+      const optionsEl = card.querySelector('.aq-options');
+      if (optionsEl) optionsEl.remove();
+      showToast('Response sent to agent.', 'ok');
+    } else {
+      const data = await res.json().catch(() => ({}));
+      showToast(`Failed: ${data.detail || res.statusText}`, 'error');
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Send';
+    }
+  } catch (err) {
+    showToast(`Network error: ${err.message}`, 'error');
+    submitBtn.disabled = false;
+    submitBtn.textContent = 'Send';
+  }
+}
+
+function removeAgentQuestion(interactionId) {
+  const card = document.getElementById(`question-${interactionId}`);
+  if (card) {
+    card.classList.add('aq-answered');
+    const timer = card.querySelector('.aq-timer');
+    if (timer) timer.textContent = 'Answered';
+    // Remove after animation
+    setTimeout(() => card.remove(), 3000);
+  }
+}
+
+// Load pending interactions on project select
+async function loadPendingInteractions(projectId) {
+  try {
+    const res = await fetch(`${API_BASE}/projects/${projectId}/interactions?status=pending`);
+    if (res.ok) {
+      const data = await res.json();
+      (data.interactions || []).forEach(interaction => {
+        showAgentQuestion({
+          interaction_id: interaction.id,
+          agent_id: interaction.agent_id,
+          agent_name: interaction.agent_id ? `Agent ${interaction.agent_id.slice(0, 8)}` : 'Agent',
+          project_id: interaction.project_id,
+          question: interaction.question,
+          options: interaction.options || [],
+          context: interaction.context || '',
+        });
+      });
+    }
+  } catch (err) {
+    // Not critical
+  }
 }
 
 // ── Init ─────────────────────────────────────────────────────

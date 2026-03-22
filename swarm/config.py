@@ -53,6 +53,14 @@ class SwarmConfig:
         default_factory=lambda: os.getenv("GEMINI_API_KEY", "")
     )
 
+    # Search API keys (Tavily first, Brave second — both have free tiers)
+    tavily_api_key: str = field(
+        default_factory=lambda: os.getenv("TAVILY_API_KEY", "")
+    )
+    serper_api_key: str = field(
+        default_factory=lambda: os.getenv("SERPER_API_KEY", "")
+    )
+
     # Agent tool loop
     agent_max_tool_steps: int = field(
         default_factory=lambda: int(os.getenv("AGENT_MAX_TOOL_STEPS", "8"))

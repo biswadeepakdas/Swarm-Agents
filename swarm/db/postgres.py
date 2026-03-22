@@ -34,11 +34,18 @@ class PostgresDB:
             logger.info("PostgreSQL pool closed")
 
     async def run_migrations(self) -> None:
-        migration_file = Path(__file__).parent.parent / "migrations" / "001_initial.sql"
-        sql = migration_file.read_text()
+        migrations_dir = Path(__file__).parent.parent / "migrations"
+        migration_files = sorted(migrations_dir.glob("*.sql"))
         async with self.pool.acquire() as conn:
-            await conn.execute(sql)
-        logger.info("Migrations applied")
+            for mf in migration_files:
+                sql = mf.read_text()
+                try:
+                    await conn.execute(sql)
+                    logger.info(f"Migration applied: {mf.name}")
+                except Exception as e:
+                    # IF NOT EXISTS handles most cases — log and continue
+                    logger.debug(f"Migration {mf.name} note: {e}")
+        logger.info(f"All migrations applied ({len(migration_files)} files)")
 
     # ── Project CRUD ──────────────────────────────────────────────
 
@@ -264,6 +271,61 @@ class PostgresDB:
             row = await conn.fetchrow("SELECT * FROM artifacts WHERE id = $1", artifact_id)
             return dict(row) if row else None
 
+    # ── Interaction CRUD ────────────────────────────────────────────
+
+    async def create_interaction(self, interaction: dict[str, Any]) -> dict[str, Any]:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                INSERT INTO interactions (id, project_id, task_id, agent_id, question, options, context, status)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                RETURNING *
+                """,
+                interaction["id"],
+                interaction["project_id"],
+                interaction.get("task_id"),
+                interaction.get("agent_id"),
+                interaction["question"],
+                interaction.get("options", []),
+                interaction.get("context", ""),
+                interaction.get("status", "pending"),
+            )
+            return dict(row)
+
+    async def get_interaction(self, interaction_id: str) -> dict[str, Any] | None:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM interactions WHERE id = $1", interaction_id)
+            return dict(row) if row else None
+
+    async def get_pending_interactions(self, project_id: str) -> list[dict]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM interactions WHERE project_id = $1 AND status = 'pending' ORDER BY created_at",
+                project_id,
+            )
+            return [dict(r) for r in rows]
+
+    async def answer_interaction(self, interaction_id: str, response: str) -> dict[str, Any] | None:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                """
+                UPDATE interactions SET response = $1, status = 'answered', answered_at = NOW()
+                WHERE id = $2 AND status = 'pending'
+                RETURNING *
+                """,
+                response,
+                interaction_id,
+            )
+            return dict(row) if row else None
+
+    async def expire_interactions(self, task_id: str) -> None:
+        """Expire all pending interactions for a task (e.g., on timeout)."""
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE interactions SET status = 'expired' WHERE task_id = $1 AND status = 'pending'",
+                task_id,
+            )
+
     # ── Memory CRUD ───────────────────────────────────────────────
 
     async def store_memory(self, memory: dict[str, Any]) -> None:
@@ -290,12 +352,31 @@ class PostgresDB:
                 """
                 SELECT *, embedding <=> $1::vector AS distance
                 FROM memories
-                WHERE project_id = $2
+                WHERE project_id = $2 AND embedding IS NOT NULL
                 ORDER BY embedding <=> $1::vector
                 LIMIT $3
                 """,
                 embedding_str,
                 project_id,
+                k,
+            )
+            return [dict(r) for r in rows]
+
+    async def search_memories_global(
+        self, embedding: list[float], k: int = 5
+    ) -> list[dict]:
+        """Search memories across ALL projects — for cross-project learning."""
+        embedding_str = "[" + ",".join(str(x) for x in embedding) + "]"
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT *, embedding <=> $1::vector AS distance
+                FROM memories
+                WHERE embedding IS NOT NULL
+                ORDER BY embedding <=> $1::vector
+                LIMIT $2
+                """,
+                embedding_str,
                 k,
             )
             return [dict(r) for r in rows]

@@ -111,7 +111,9 @@ class SwarmAgent:
         self._file_ops = None
         self._code_runner = None
         self._web_search = None
+        self._web_browser = None
         self._env_query = None
+        self._ask_user_count = 0  # Limit ask_user calls per agent
 
     def _init_tools(self) -> None:
         """Lazy-initialize tool instances."""
@@ -130,6 +132,10 @@ class SwarmAgent:
         if "web_search" in self._tool_names:
             from swarm.tools.web_search import WebSearchTool
             self._web_search = WebSearchTool()
+
+        if "fetch_page" in self._tool_names:
+            from swarm.tools.web_browser import WebBrowserTool
+            self._web_browser = WebBrowserTool()
 
         if "query_artifacts" in self._tool_names:
             from swarm.tools.environment_query import EnvironmentQueryTool
@@ -387,6 +393,84 @@ class SwarmAgent:
                     for r in results[:5]
                 )
 
+            elif name == "fetch_page":
+                if not self._web_browser:
+                    return "Web browsing unavailable for this task type."
+                url = args.get("url", "")
+                if not url:
+                    return "Error: URL is required."
+                page = await self._web_browser.fetch_page(url)
+                if page.success:
+                    return f"**{page.title}**\nURL: {page.url}\n\n{page.text}"
+                return f"Failed to fetch page: {page.error}. Proceed with existing knowledge."
+
+            elif name == "ask_user":
+                # Limit to 1 ask_user per agent to prevent infinite loops
+                self._ask_user_count += 1
+                if self._ask_user_count > 1:
+                    return "You've already asked the user once. Proceed with your best judgment and submit your artifact."
+
+                question = args.get("question", "")
+                options = args.get("options", [])
+                context = args.get("context", "")
+
+                if not question:
+                    return "Error: question is required."
+
+                # Create interaction record in DB
+                import uuid
+                interaction_id = str(uuid.uuid4())
+                try:
+                    await self.db.create_interaction({
+                        "id": interaction_id,
+                        "project_id": self.task.project_id,
+                        "task_id": self.task.id,
+                        "agent_id": self.identity.id,
+                        "question": question,
+                        "options": options if isinstance(options, list) else [],
+                        "context": context,
+                        "status": "pending",
+                    })
+                except Exception as e:
+                    logger.warning(f"Failed to create interaction: {e}")
+                    return "Could not ask user (interaction system unavailable). Proceed with your best judgment."
+
+                # Emit event so frontend shows the question
+                await self.redis.publish_event({
+                    "type": "agent_question",
+                    "interaction_id": interaction_id,
+                    "agent_id": self.identity.id,
+                    "agent_name": self.identity.name,
+                    "project_id": self.task.project_id,
+                    "task_id": self.task.id,
+                    "question": question,
+                    "options": options,
+                    "context": context,
+                })
+
+                await self._emit_progress("waiting_for_user", f"Asked: {question[:80]}")
+
+                # Poll for user response (with timeout)
+                import asyncio as _poll_asyncio
+                poll_timeout = 120  # 2 minutes max wait
+                poll_interval = 2   # check every 2 seconds
+                elapsed = 0
+
+                while elapsed < poll_timeout:
+                    await _poll_asyncio.sleep(poll_interval)
+                    elapsed += poll_interval
+
+                    interaction = await self.db.get_interaction(interaction_id)
+                    if interaction and interaction.get("status") == "answered":
+                        user_response = interaction.get("response", "")
+                        await self._emit_progress("user_responded", f"User said: {user_response[:80]}")
+                        return f"User's response: {user_response}"
+
+                # Timeout — expire and move on
+                await self.db.expire_interactions(self.task.id)
+                await self._emit_progress("ask_timeout", "User didn't respond in time, proceeding with best judgment")
+                return "User did not respond in time. Proceed with your best judgment and submit your artifact."
+
             elif name == "submit_artifact":
                 self._submitted_artifact = args
                 return "Artifact submitted successfully."
@@ -455,6 +539,7 @@ class SwarmAgent:
 
         model, api_base, api_key = self._resolve_model_params()
         llm_timeout = 90
+        is_reasoning = self._is_reasoning_model(model)
 
         try:
             call_kwargs: dict[str, Any] = {
@@ -468,8 +553,10 @@ class SwarmAgent:
             if api_base:
                 call_kwargs["api_base"] = api_base
 
-            # Add tools if the model supports function calling
-            if self._tool_schemas and self._model_supports_tools(model):
+            # Reasoning models don't support tools — use simple call
+            if is_reasoning:
+                call_kwargs.pop("temperature", None)  # Some reasoning models reject temperature
+            elif self._tool_schemas and self._model_supports_tools(model):
                 call_kwargs["tools"] = self._tool_schemas
                 call_kwargs["tool_choice"] = "auto"
 
@@ -477,6 +564,9 @@ class SwarmAgent:
                 litellm.acompletion(**call_kwargs),
                 timeout=llm_timeout + 10,
             )
+
+            # Fix reasoning models that return content=null
+            response = self._fix_reasoning_response(response)
             return response
 
         except _asyncio.TimeoutError:
@@ -501,10 +591,15 @@ class SwarmAgent:
         if api_base:
             call_kwargs["api_base"] = api_base
 
+        # Reasoning models may not accept temperature
+        if self._is_reasoning_model(model):
+            call_kwargs.pop("temperature", None)
+
         response = await _asyncio.wait_for(
             litellm.acompletion(**call_kwargs),
             timeout=100,
         )
+        response = self._fix_reasoning_response(response)
         return response.choices[0].message.content or ""
 
     def _resolve_model_params(self) -> tuple[str, str | None, str]:
@@ -531,10 +626,79 @@ class SwarmAgent:
 
     def _model_supports_tools(self, model: str) -> bool:
         """Check if the model supports function calling."""
+        # Reasoning models don't support tools
+        if self._is_reasoning_model(model):
+            return False
         # Most modern models support function calling via litellm
-        # NVIDIA NIM Llama 3.3 supports it via OpenAI-compat
         no_tools = ["claude-3-haiku", "llama-2", "mistral-7b"]
         return not any(nt in model.lower() for nt in no_tools)
+
+    def _is_reasoning_model(self, model: str) -> bool:
+        """Check if this is a reasoning/chain-of-thought model that returns content differently."""
+        reasoning_patterns = [
+            "nemotron",
+            "magistral",
+            "phi-4-mini-flash-reasoning",
+            "reasoning",
+        ]
+        m = model.lower()
+        return any(p in m for p in reasoning_patterns)
+
+    def _fix_reasoning_response(self, response: Any) -> Any:
+        """
+        Fix reasoning models that return content=null.
+        These models put output in reasoning_content, thinking, or other fields.
+        Extract the actual content so downstream code works normally.
+        """
+        try:
+            message = response.choices[0].message
+            content = message.content
+
+            if content:
+                # Strip <think>...</think> tags if present (Phi-4, etc.)
+                if "<think>" in content:
+                    import re
+                    # Extract text outside think tags
+                    cleaned = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+                    if cleaned:
+                        message.content = cleaned
+                return response
+
+            # content is None/empty — try to extract from reasoning fields
+            # litellm sometimes exposes reasoning_content
+            reasoning = getattr(message, 'reasoning_content', None)
+            if reasoning:
+                message.content = reasoning
+                logger.info(f"Agent {self.identity.id}: Extracted content from reasoning_content field")
+                return response
+
+            # Check for thinking field (some models)
+            thinking = getattr(message, 'thinking', None)
+            if thinking:
+                message.content = thinking
+                logger.info(f"Agent {self.identity.id}: Extracted content from thinking field")
+                return response
+
+            # Check model_extra for any content-like fields
+            extra = getattr(message, 'model_extra', {}) or {}
+            for key in ('reasoning_content', 'thinking', 'reasoning', 'thought'):
+                if key in extra and extra[key]:
+                    message.content = extra[key]
+                    logger.info(f"Agent {self.identity.id}: Extracted content from model_extra[{key}]")
+                    return response
+
+            # Last resort: check if there are tool_calls (valid empty content)
+            if getattr(message, 'tool_calls', None):
+                return response
+
+            # Truly empty — set a fallback
+            logger.warning(f"Agent {self.identity.id}: Reasoning model returned null content, no fallback found")
+            message.content = "(Model returned empty response — reasoning model may need different handling)"
+
+        except Exception as e:
+            logger.warning(f"Error fixing reasoning response: {e}")
+
+        return response
 
     # ── Prompt Building ────────────────────────────────────────────
 

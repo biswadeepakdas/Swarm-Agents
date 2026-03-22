@@ -143,6 +143,49 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "ask_user",
+            "description": "Ask the user a clarifying question when you're unsure about requirements, design decisions, or need approval. The agent will pause until the user responds. Use sparingly — only when the answer significantly affects your output.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question to ask the user",
+                    },
+                    "options": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional list of suggested answers (multiple choice). If provided, the user can pick one or type a custom response.",
+                    },
+                    "context": {
+                        "type": "string",
+                        "description": "Brief context explaining why you need this information",
+                    },
+                },
+                "required": ["question"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "fetch_page",
+            "description": "Fetch and extract the main text content from a web page URL. Returns cleaned text, useful for reading documentation, articles, API references, etc.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "The URL of the web page to fetch and extract text from",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "submit_artifact",
             "description": "Submit your final artifact (code, design, review, etc.). Call this when your work is complete. This is REQUIRED — you must submit exactly one artifact.",
             "parameters": {
@@ -179,31 +222,31 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
 
 # Which tools each task type can access
 TASK_TOOL_MAP: dict[TaskType, list[str]] = {
-    # Research/planning agents: search + query
-    TaskType.ANALYZE_REQUIREMENTS: ["web_search", "query_artifacts", "submit_artifact"],
-    TaskType.PLAN_ARCHITECTURE: ["web_search", "query_artifacts", "submit_artifact"],
-    TaskType.RESEARCH: ["web_search", "query_artifacts", "submit_artifact"],
+    # Research/planning agents: search + browse + ask_user + query
+    TaskType.ANALYZE_REQUIREMENTS: ["web_search", "fetch_page", "ask_user", "query_artifacts", "submit_artifact"],
+    TaskType.PLAN_ARCHITECTURE: ["web_search", "fetch_page", "ask_user", "query_artifacts", "submit_artifact"],
+    TaskType.RESEARCH: ["web_search", "fetch_page", "query_artifacts", "submit_artifact"],
 
-    # Build agents: full toolset (code + files + search)
-    TaskType.WRITE_CODE: ["run_python", "web_search", "write_file", "read_file", "list_files", "query_artifacts", "submit_artifact"],
-    TaskType.CREATE_API: ["run_python", "web_search", "write_file", "read_file", "list_files", "query_artifacts", "submit_artifact"],
-    TaskType.DESIGN_DATABASE: ["web_search", "write_file", "query_artifacts", "submit_artifact"],
-    TaskType.BUILD_FRONTEND_COMPONENT: ["web_search", "write_file", "read_file", "list_files", "query_artifacts", "submit_artifact"],
-    TaskType.FIX_CODE: ["run_python", "web_search", "write_file", "read_file", "list_files", "query_artifacts", "submit_artifact"],
+    # Build agents: full toolset (code + files + search + browse + ask_user)
+    TaskType.WRITE_CODE: ["run_python", "web_search", "fetch_page", "write_file", "read_file", "list_files", "query_artifacts", "submit_artifact"],
+    TaskType.CREATE_API: ["run_python", "web_search", "fetch_page", "write_file", "read_file", "list_files", "query_artifacts", "submit_artifact"],
+    TaskType.DESIGN_DATABASE: ["web_search", "fetch_page", "ask_user", "write_file", "query_artifacts", "submit_artifact"],
+    TaskType.BUILD_FRONTEND_COMPONENT: ["web_search", "fetch_page", "write_file", "read_file", "list_files", "query_artifacts", "submit_artifact"],
+    TaskType.FIX_CODE: ["run_python", "web_search", "fetch_page", "write_file", "read_file", "list_files", "query_artifacts", "submit_artifact"],
     TaskType.DEPLOY: ["write_file", "query_artifacts", "submit_artifact"],
 
-    # Design agents: search + query
-    TaskType.DESIGN_UI: ["web_search", "query_artifacts", "submit_artifact"],
+    # Design agents: search + browse + ask_user + query
+    TaskType.DESIGN_UI: ["web_search", "fetch_page", "ask_user", "query_artifacts", "submit_artifact"],
 
     # QA agents: code execution + query
     TaskType.REVIEW_CODE: ["run_python", "query_artifacts", "submit_artifact"],
     TaskType.WRITE_TESTS: ["run_python", "write_file", "read_file", "query_artifacts", "submit_artifact"],
     TaskType.INTEGRATION_TEST: ["run_python", "write_file", "read_file", "query_artifacts", "submit_artifact"],
-    TaskType.DEBUG: ["run_python", "web_search", "read_file", "query_artifacts", "submit_artifact"],
+    TaskType.DEBUG: ["run_python", "web_search", "fetch_page", "read_file", "query_artifacts", "submit_artifact"],
 
     # Docs
-    TaskType.WRITE_DOCS: ["query_artifacts", "write_file", "submit_artifact"],
-    TaskType.RESOLVE_CONFLICT: ["query_artifacts", "submit_artifact"],
+    TaskType.WRITE_DOCS: ["web_search", "fetch_page", "query_artifacts", "write_file", "submit_artifact"],
+    TaskType.RESOLVE_CONFLICT: ["ask_user", "query_artifacts", "submit_artifact"],
 }
 
 

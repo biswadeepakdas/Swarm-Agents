@@ -1,11 +1,18 @@
 """
 Web search tool — agents can search for documentation, packages, and APIs.
-Supports multiple backends: googlesearch-python (default), DuckDuckGo, httpx fallback.
+
+Priority chain:
+1. Tavily (designed for AI agents, returns clean content — 1K free/month)
+2. Serper.dev (Google results via API — 2.5K free queries)
+3. googlesearch-python (scrapes Google HTML — often 429 from cloud IPs)
+4. DuckDuckGo (AsyncDDGS)
+5. httpx fallback (raw DuckDuckGo HTML scrape)
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
 
 logger = logging.getLogger("swarm.tools.web_search")
@@ -21,18 +28,137 @@ class SearchResult:
 class WebSearchTool:
     async def search(self, query: str, max_results: int = 5) -> list[SearchResult]:
         """Search the web — tries multiple backends in order."""
-        # Try 1: googlesearch-python (most reliable in containers)
+        # Try 1: Tavily (best for agents — returns pre-extracted content)
+        results = await self._tavily_search(query, max_results)
+        if results:
+            return results
+
+        # Try 2: Serper.dev (Google results via API)
+        results = await self._serper_search(query, max_results)
+        if results:
+            return results
+
+        # Try 3: googlesearch-python (often 429 from cloud IPs)
         results = await self._google_search(query, max_results)
         if results:
             return results
 
-        # Try 2: DuckDuckGo
+        # Try 4: DuckDuckGo
         results = await self._ddg_search(query, max_results)
         if results:
             return results
 
-        # Try 3: raw httpx fallback
+        # Try 5: raw httpx fallback
         return await self._httpx_fallback(query, max_results)
+
+    async def _tavily_search(self, query: str, max_results: int) -> list[SearchResult]:
+        """Use Tavily Search API — purpose-built for AI agents."""
+        api_key = os.getenv("TAVILY_API_KEY", "")
+        if not api_key:
+            return []
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    "https://api.tavily.com/search",
+                    json={
+                        "api_key": api_key,
+                        "query": query,
+                        "max_results": max_results,
+                        "search_depth": "basic",
+                        "include_answer": True,
+                        "include_raw_content": False,
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+            results = []
+            # Tavily provides an AI-generated answer — include it as first result
+            answer = data.get("answer")
+            if answer:
+                results.append(SearchResult(
+                    title="Tavily AI Answer",
+                    url="",
+                    snippet=answer[:500],
+                ))
+
+            for item in data.get("results", [])[:max_results]:
+                results.append(SearchResult(
+                    title=item.get("title", ""),
+                    url=item.get("url", ""),
+                    snippet=item.get("content", "")[:400],
+                ))
+            logger.info(f"Tavily search returned {len(results)} results for: {query[:50]}")
+            return results
+
+        except ImportError:
+            logger.debug("httpx not installed for Tavily")
+            return []
+        except Exception as e:
+            logger.warning(f"Tavily search failed: {e}")
+            return []
+
+    async def _serper_search(self, query: str, max_results: int) -> list[SearchResult]:
+        """Use Serper.dev — Google Search results via API (2.5K free queries)."""
+        api_key = os.getenv("SERPER_API_KEY", "")
+        if not api_key:
+            return []
+        try:
+            import httpx
+
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(
+                    "https://google.serper.dev/search",
+                    json={"q": query, "num": max_results},
+                    headers={
+                        "X-API-KEY": api_key,
+                        "Content-Type": "application/json",
+                    },
+                )
+                resp.raise_for_status()
+                data = resp.json()
+
+            results = []
+
+            # Include knowledge graph if available
+            kg = data.get("knowledgeGraph")
+            if kg and kg.get("description"):
+                results.append(SearchResult(
+                    title=kg.get("title", "Knowledge Graph"),
+                    url=kg.get("website", ""),
+                    snippet=kg.get("description", "")[:400],
+                ))
+
+            # Include answer box if available
+            answer = data.get("answerBox")
+            if answer:
+                snippet = answer.get("answer") or answer.get("snippet") or answer.get("title", "")
+                if snippet:
+                    results.append(SearchResult(
+                        title="Google Answer",
+                        url=answer.get("link", ""),
+                        snippet=str(snippet)[:400],
+                    ))
+
+            # Organic results
+            for item in data.get("organic", [])[:max_results]:
+                results.append(SearchResult(
+                    title=item.get("title", ""),
+                    url=item.get("link", ""),
+                    snippet=item.get("snippet", "")[:400],
+                ))
+
+            logger.info(f"Serper search returned {len(results)} results for: {query[:50]}")
+            return results
+
+        except ImportError:
+            logger.debug("httpx not installed for Serper")
+            return []
+        except Exception as e:
+            logger.warning(f"Serper search failed: {e}")
+            return []
 
     async def _google_search(self, query: str, max_results: int) -> list[SearchResult]:
         """Use googlesearch-python package."""
@@ -40,7 +166,6 @@ class WebSearchTool:
             import asyncio
             from googlesearch import search as gsearch
 
-            # googlesearch is sync, run in executor
             loop = asyncio.get_event_loop()
             urls = await loop.run_in_executor(
                 None,

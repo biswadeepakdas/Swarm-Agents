@@ -21,5 +21,9 @@ googlesearch-python>=1.2.0
 duckduckgo-search>=6.0.0
 httpx>=0.25.0
 
+# Web browsing (page content extraction)
+trafilatura>=1.8.0
+beautifulsoup4>=4.12.0
+
 # Utilities
 python-dotenv==1.0.1
